@@ -13,6 +13,7 @@ publish = false
 captain-core = { path = "crates/captain-core" }
 captain-format = { path = "crates/captain-format" }
 captain-inbox = { path = "crates/captain-inbox" }
+captain-ipc = { path = "crates/captain-ipc" }
 captain-protocol = { path = "crates/captain-protocol" }
 captain-store = { path = "crates/captain-store" }
 captain-vault = { path = "crates/captain-vault" }
@@ -32,7 +33,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs", "net", "io-util"] }
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
