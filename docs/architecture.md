@@ -65,6 +65,9 @@ The unit tests in `session.rs` check that an auth key never reaches the state fi
 - No per-chat filter or on/off switch yet. `listen` prints every update.
 - Nothing has run against a live account yet. The first `captain auth login` is the real test.
 
+The planned daemon, scope gate, triggers, tickets and Claude drafts are designed in
+`docs/design/`, starting with `docs/design/README.md`. None of it is built yet.
+
 ## Build size
 
 `grammers-tl-types` compiles the whole TL schema, so one clean `make check` leaves about 1 GB

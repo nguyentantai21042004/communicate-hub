@@ -22,6 +22,8 @@ is a placeholder that sends text as written.
 | `captain-cli` | app | The `captain` command. |
 
 `docs/architecture.md` explains how the pieces fit. `docs/CONVENTIONS.md` has the code rules.
+`docs/design/` describes the planned inbox: a daemon that turns mentions and DMs into tickets,
+and Claude drafts that you review in the Telegram app before sending.
 
 ## Quick start
 
