@@ -1,0 +1,89 @@
+diff --git a/telegram_mcp/runtime.py b/telegram_mcp/runtime.py
+index 469182e..299106c 100644
+--- a/telegram_mcp/runtime.py
++++ b/telegram_mcp/runtime.py
+@@ -966,7 +966,11 @@ def is_chat_allowed(chat_identifier: Any, entity: Any = None) -> bool:
+     allowed = get_effective_allowed_chat_ids()
+     if allowed is None:
+         return True
++    return chat_in_set(allowed, chat_identifier, entity)
+ 
++
++def chat_in_set(allowed: set[Union[int, str]], chat_identifier: Any, entity: Any = None) -> bool:
++    """Match a chat against a set built by _parse_allowed_chat_ids (ids, marked ids, handles)."""
+     if chat_identifier is not None:
+         if isinstance(chat_identifier, int):
+             if chat_identifier in allowed:
+diff --git a/telegram_mcp/tools/events.py b/telegram_mcp/tools/events.py
+index a71d753..13b8fc4 100644
+--- a/telegram_mcp/tools/events.py
++++ b/telegram_mcp/tools/events.py
+@@ -109,6 +109,50 @@ def feed_file_path() -> Path:
+     return Path(override) if override else _default_feed_file()
+ 
+ 
++# --- Capture switch (runtime on/off + thread selection) ---
++# A small JSON file the operator edits while the server runs:
++#   {"enabled": true, "chats": ["@alice", 123456789]}
++# Missing file keeps the old behaviour (capture every allowed private chat).
++# "chats" empty or absent means every allowed chat. It narrows capture only;
++# TELEGRAM_ALLOWED_CHAT_IDS still bounds what the agent can read or draft to.
++_CAPTURE_FILE_ENV = "TELEGRAM_CAPTURE_FILE"
++_capture_cache: Tuple[Optional[float], Tuple[bool, Optional[set]]] = (None, (True, None))
++
++
++def capture_file_path() -> Path:
++    override = os.getenv(_CAPTURE_FILE_ENV)
++    return Path(override) if override else _default_feed_file().with_name("capture.json")
++
++
++def _load_capture_rules() -> Tuple[bool, Optional[set]]:
++    """Return (enabled, chat set or None for all), re-reading the file only when it changes."""
++    global _capture_cache
++    path = capture_file_path()
++    try:
++        mtime = path.stat().st_mtime
++    except FileNotFoundError:
++        _capture_cache = (None, (True, None))
++        return _capture_cache[1]
++    if _capture_cache[0] == mtime:
++        return _capture_cache[1]
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++        rules = (bool(data.get("enabled", True)), _parse_allowed_chat_ids(data.get("chats") or []))
++    except (OSError, ValueError, AttributeError):
++        # Fail closed: a half-written or hand-broken file must not open capture to every chat.
++        logging.getLogger("telegram_mcp").error("Invalid capture file; capture paused")
++        rules = (False, None)
++    _capture_cache = (mtime, rules)
++    return rules
++
++
++def is_capture_wanted(chat_id: int, sender: Any = None) -> bool:
++    enabled, chats = _load_capture_rules()
++    if not enabled:
++        return False
++    return chats is None or chat_in_set(chats, chat_id, sender)
++
++
+ def feed_enabled() -> bool:
+     return _feed_task is not None and not _feed_task.done()
+ 
+@@ -211,6 +255,8 @@ async def _on_new_incoming(event) -> None:
+         chat_id = event.chat_id
+         if is_chat_allowlist_enabled() and not is_chat_allowed(chat_id, sender):
+             return
++        if not is_capture_wanted(chat_id, sender):
++            return
+         now = time.monotonic()
+         msg_id = event.message.id
+         rec = _pending_msgs.get(chat_id)
+@@ -472,6 +518,8 @@ def incoming_feed_state() -> Dict[str, Any]:
+         "watch_command_for_one_chat": (
+             f"tail -n 0 -F {shlex.quote(str(path))} | grep --line-buffered '\"chat_id\": <ID>'"
+         ),
++        "capture_file": str(capture_file_path()),
++        "capture_enabled": _load_capture_rules()[0],
+         "autostart_pending": (
+             not _feed_autostart_done
+             and not feed_enabled()

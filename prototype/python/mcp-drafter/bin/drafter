@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""drafter: turn each captured Telegram burst into a task and let Claude save a reply draft.
+
+Tails the incoming feed written by the telegram-mcp server. For every settled
+burst it runs one headless `claude -p` limited to three MCP tools (read history,
+read context, save_draft), then records the outcome in tasks.jsonl. Nothing is
+ever sent: the draft waits in the Telegram input box until Tài sends it.
+
+  drafter              run forever (use launchd on the idle MacBook)
+  drafter --once       process what is pending, then exit
+  drafter --dry-run    print the claude command per event instead of running it
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE = Path(os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "telegram-mcp"
+FEED = Path(os.getenv("TELEGRAM_EVENT_FEED_FILE") or STATE / "incoming_feed.jsonl")
+TASKS = Path(os.getenv("CAPTAIN_TASKS_FILE") or STATE / "tasks.jsonl")
+OFFSET = STATE / "drafter.offset"
+RUNS = STATE / "runs"  # one stream-json trace per task: tool calls, what Claude read, the draft
+PROMPT = ROOT / "prompts" / "draft.md"
+CONTEXT = ROOT / "prompts" / "context.md"  # optional: what was shipped, runbooks, on-call notes
+ALLOWED = "mcp__telegram__get_history,mcp__telegram__get_message_context,mcp__telegram__save_draft"
+
+
+def record(event, status, note="", **extra):
+    TASKS.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": status,
+        "chat_id": event.get("chat_id"),
+        "name": event.get("name"),
+        "last_message_id": event.get("last_message_id"),
+        "note": note[:300],
+        **extra,
+    }
+    fd = os.open(TASKS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def build_cmd(event):
+    fields = {k: event.get(k, "") for k in ("chat_id", "name", "username", "message_count", "first_message_id", "last_message_id")}
+    prompt = PROMPT.read_text(encoding="utf-8").format(**fields)
+    cmd = [
+        "claude", "-p", prompt,
+        "--mcp-config", str(ROOT / "mcp.json"), "--strict-mcp-config",
+        "--tools", "",  # no built-in tools: no shell, no file access
+        "--allowedTools", ALLOWED,
+        "--permission-mode", "dontAsk",
+        "--no-session-persistence",
+        "--output-format", "stream-json", "--verbose",
+        "--max-budget-usd", os.getenv("CAPTAIN_MAX_USD", "0.50"),
+    ]
+    if os.getenv("CAPTAIN_MODEL"):
+        cmd += ["--model", os.environ["CAPTAIN_MODEL"]]
+    if CONTEXT.exists():
+        cmd += ["--append-system-prompt-file", str(CONTEXT)]
+    return cmd
+
+
+def handle(event, dry_run):
+    cmd = build_cmd(event)
+    if dry_run:
+        print(json.dumps(cmd[:2] + ["<prompt>"] + cmd[3:], ensure_ascii=False))
+        print(cmd[2])
+        return
+    RUNS.mkdir(parents=True, exist_ok=True, mode=0o700)
+    trace = RUNS / f"{time.strftime('%Y%m%d-%H%M%S')}-{event.get('chat_id')}.jsonl"
+    record(event, "queued", trace=str(trace))
+    fd = os.open(trace, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds private chat text
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        try:
+            out = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True, timeout=300, cwd=ROOT)
+        except subprocess.TimeoutExpired:
+            record(event, "failed", "claude timed out after 300s", trace=str(trace))
+            return
+    result = {}
+    for line in trace.read_text(encoding="utf-8").splitlines():
+        if line.startswith('{"type":"result"'):
+            result = json.loads(line)
+    last = (str(result.get("result", "")).strip().splitlines() or [""])[-1]
+    meta = {"trace": str(trace), "cost_usd": result.get("total_cost_usd")}
+    if out.returncode != 0 or result.get("is_error"):
+        err = out.stderr.strip().splitlines()
+        record(event, "failed", last or (err[-1] if err else f"claude exited {out.returncode}"), **meta)
+    elif last.startswith("SKIPPED"):
+        record(event, "skipped", last, **meta)
+    else:
+        record(event, "drafted", last, **meta)
+
+
+def read_new(offset):
+    if not FEED.exists():
+        return offset, []
+    size = FEED.stat().st_size
+    if size < offset:  # rotated or truncated
+        offset = 0
+    with FEED.open("rb") as f:
+        f.seek(offset)
+        chunk = f.read()
+    # Only consume complete lines; a partial trailing line waits for the next poll.
+    end = chunk.rfind(b"\n") + 1
+    lines = [json.loads(l) for l in chunk[:end].decode("utf-8").splitlines() if l.strip()]
+    return offset + end, lines
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--from-start", action="store_true", help="replay the whole feed instead of resuming")
+    args = ap.parse_args(argv)
+
+    if args.from_start or not OFFSET.exists():
+        # First run starts at the end so an old feed does not trigger a burst of drafts.
+        offset = 0 if args.from_start else (FEED.stat().st_size if FEED.exists() else 0)
+    else:
+        offset = int(OFFSET.read_text() or 0)
+    while True:
+        offset, events = read_new(offset)
+        for ev in events:
+            handle(ev, args.dry_run)
+        if not args.dry_run:
+            OFFSET.parent.mkdir(parents=True, exist_ok=True)
+            OFFSET.write_text(str(offset))
+        if args.once or args.dry_run:
+            return 0
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

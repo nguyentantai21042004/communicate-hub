@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""captain: turn Telegram DM capture on/off and pick which threads land in the task feed.
+
+Edits the capture file the patched telegram-mcp server re-reads on every incoming
+message, so changes apply without a restart.
+
+  captain status            show switch, selected threads, feed and task counts
+  captain on | off          resume / pause capture (server keeps running)
+  captain add @alice 12345  capture only these threads (username or numeric id)
+  captain rm @alice         drop a thread; an empty list means every allowed chat
+  captain clear             empty the list (capture every allowed chat)
+  captain tasks [-n 20]     recent tasks written by the drafter
+  captain trace [FILE]      what Claude read, which tools it called, the draft (default: last task)
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+STATE = Path(os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "telegram-mcp"
+CAPTURE = Path(os.getenv("TELEGRAM_CAPTURE_FILE") or STATE / "capture.json")
+FEED = Path(os.getenv("TELEGRAM_EVENT_FEED_FILE") or STATE / "incoming_feed.jsonl")
+TASKS = Path(os.getenv("CAPTAIN_TASKS_FILE") or STATE / "tasks.jsonl")
+
+
+def load():
+    if not CAPTURE.exists():
+        return {"enabled": True, "chats": []}
+    return json.loads(CAPTURE.read_text(encoding="utf-8"))
+
+
+def save(data):
+    CAPTURE.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic replace: the server must never read a half-written file (it fails closed on one).
+    fd, tmp = tempfile.mkstemp(dir=CAPTURE.parent, prefix=".capture.")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CAPTURE)
+
+
+def norm(chat):
+    return int(chat) if chat.lstrip("-").isdigit() else chat.lstrip("@").lower()
+
+
+def count_lines(path):
+    return sum(1 for _ in path.open(encoding="utf-8")) if path.exists() else 0
+
+
+def show_trace(path):
+    if not path:
+        rows = [json.loads(l) for l in TASKS.read_text(encoding="utf-8").splitlines()] if TASKS.exists() else []
+        path = next((r["trace"] for r in reversed(rows) if r.get("trace")), None)
+        if not path:
+            print("no traced task yet", file=sys.stderr)
+            return 1
+    print(f"# {path}")
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        ev = json.loads(line)
+        blocks = (ev.get("message") or {}).get("content") or []
+        if ev.get("type") == "assistant":
+            for b in blocks:
+                if b.get("type") == "tool_use":
+                    print(f"\n>> {b['name'].removeprefix('mcp__telegram__')}({json.dumps(b['input'], ensure_ascii=False)})")
+                elif b.get("type") == "text" and b["text"].strip():
+                    print(f"\n[claude] {b['text'].strip()}")
+        elif ev.get("type") == "user":
+            for b in blocks if isinstance(blocks, list) else []:
+                if b.get("type") == "tool_result":
+                    body = b.get("content")
+                    if isinstance(body, list):
+                        body = "".join(x.get("text", "") for x in body)
+                    print(f"<< {str(body)[:2000]}")
+        elif ev.get("type") == "result":
+            print(f"\n== {ev.get('subtype')}  cost ${ev.get('total_cost_usd', 0):.3f}  {ev.get('duration_ms', 0) / 1000:.1f}s")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    sub.add_parser("on")
+    sub.add_parser("off")
+    sub.add_parser("clear")
+    for name in ("add", "rm"):
+        p = sub.add_parser(name)
+        p.add_argument("chats", nargs="+")
+    t = sub.add_parser("tasks")
+    t.add_argument("-n", type=int, default=20)
+    tr = sub.add_parser("trace")
+    tr.add_argument("file", nargs="?")
+    args = ap.parse_args(argv)
+
+    data = load()
+    chats = data.get("chats") or []
+    if args.cmd in ("on", "off"):
+        data["enabled"] = args.cmd == "on"
+    elif args.cmd == "add":
+        chats += [c for c in map(norm, args.chats) if c not in chats]
+        data["chats"] = chats
+    elif args.cmd == "rm":
+        drop = set(map(norm, args.chats))
+        data["chats"] = [c for c in chats if c not in drop]
+    elif args.cmd == "clear":
+        data["chats"] = []
+    elif args.cmd == "tasks":
+        if TASKS.exists():
+            for line in TASKS.read_text(encoding="utf-8").splitlines()[-args.n:]:
+                r = json.loads(line)
+                cost = f"${r['cost_usd']:.3f}" if r.get("cost_usd") is not None else ""
+                print(f"{r['ts']}  {r['status']:<8} {r.get('name', '')} ({r['chat_id']})  {cost:>7}  {r.get('note', '')}")
+        return 0
+    elif args.cmd == "trace":
+        return show_trace(args.file)
+
+    if args.cmd != "status":
+        save(data)
+    print(json.dumps({
+        "capture": "on" if data.get("enabled", True) else "off",
+        "threads": data.get("chats") or "all allowed chats",
+        "capture_file": str(CAPTURE),
+        "feed_events": count_lines(FEED),
+        "tasks": count_lines(TASKS),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

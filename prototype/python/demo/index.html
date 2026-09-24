@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram payload demo</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --line: #e3e6ea; --text: #1c2024; --muted: #5f6b76;
+    --accent: #2563eb; --accent-text: #fff; --in: #0f766e; --out: #7c3aed; --warn: #b45309; --err: #b91c1c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 12px; align-items: center; padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eef1f4; color: var(--muted); }
+  .pill.live { background: #dcfce7; color: #166534; }
+  .pill.down { background: #fee2e2; color: var(--err); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px 20px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { order: -1; } }
+  section, aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .bar { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .bar h2 { font-size: 14px; margin: 0 auto 0 0; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  button { font: inherit; min-height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button:disabled { opacity: .55; cursor: progress; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #feed { list-style: none; margin: 0; padding: 0; max-height: calc(100vh - 150px); overflow: auto; }
+  #feed li { border-bottom: 1px solid var(--line); padding: 10px 14px; }
+  .meta { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+  .type { font-family: var(--mono); color: var(--text); font-weight: 600; }
+  .dir-in { color: var(--in); font-weight: 600; } .dir-out { color: var(--out); font-weight: 600; }
+  .text { margin: 4px 0 2px; white-space: pre-wrap; word-break: break-word; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; min-height: 24px; }
+  pre { margin: 6px 0 0; padding: 10px; background: #0f172a; color: #e2e8f0; border-radius: 8px; font: 12px/1.5 var(--mono); overflow: auto; max-height: 420px; }
+  .empty { padding: 28px 14px; color: var(--muted); text-align: center; }
+  form { padding: 14px; display: grid; gap: 10px; }
+  form label { display: grid; gap: 4px; font-weight: 600; font-size: 13px; }
+  input, textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; width: 100%; min-height: 40px; background: #fff; color: var(--text); }
+  textarea { min-height: 96px; resize: vertical; }
+  .hint { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .warn { font-size: 12px; color: var(--warn); }
+  #dialogs { list-style: none; margin: 0; padding: 0 14px 14px; max-height: 260px; overflow: auto; }
+  #dialogs button { width: 100%; text-align: left; display: flex; justify-content: space-between; gap: 8px; border: 0; border-radius: 6px; min-height: 36px; }
+  #dialogs button:hover { background: #f1f5f9; }
+  #result { margin: 0 14px 14px; }
+  .thumb { display: block; max-width: min(100%, 360px); max-height: 320px; margin: 6px 0; border-radius: 8px; border: 1px solid var(--line); }
+  .file-link { display: inline-flex; min-height: 32px; align-items: center; color: var(--accent); }
+  .drop { display: grid; gap: 8px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+  .drop.over { border-color: var(--accent); background: #eff6ff; }
+  .drop-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #preview { max-width: 100%; max-height: 180px; border-radius: 6px; }
+  .err { color: var(--err); }
+  @media (prefers-reduced-motion: no-preference) { #feed li.new { animation: flash 1.2s ease-out; } }
+  @keyframes flash { from { background: #fef9c3; } to { background: transparent; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Telegram payload demo</h1>
+  <span class="pill" id="me">đang kết nối…</span>
+  <span class="pill" id="status" role="status">stream: chưa nối</span>
+</header>
+<main>
+  <section aria-labelledby="feed-title">
+    <div class="bar">
+      <h2 id="feed-title">Payload nhận về <span class="pill" id="count">0</span></h2>
+      <label><input type="checkbox" id="only-msg" checked> Chỉ hiện tin nhắn</label>
+      <button type="button" id="clear">Xoá màn hình</button>
+    </div>
+    <ul id="feed" aria-live="polite"></ul>
+    <p class="empty" id="empty">Chưa có gì. Nhờ ai đó nhắn cho cậu, hoặc gửi thử ở khung bên phải.</p>
+  </section>
+
+  <aside aria-labelledby="send-title">
+    <div class="bar"><h2 id="send-title">Gửi bằng account của cậu</h2></div>
+    <form id="send-form">
+      <label>Tới chat
+        <input id="chat" name="chat" required autocomplete="off" placeholder="@username, số điện thoại, id, hoặc me">
+        <span class="hint">"me" là Saved Messages của cậu, an toàn để thử.</span>
+      </label>
+      <label>Nội dung
+        <textarea id="text" name="text" placeholder="Gõ tin nhắn, hoặc caption nếu gửi ảnh…"></textarea>
+        <span class="hint">Cmd/Ctrl + Enter để gửi. Dán ảnh (Cmd+V) vào đây cũng được.</span>
+      </label>
+      <div class="drop" id="drop">
+        <div class="drop-row">
+          <label style="font-weight:600">Ảnh hoặc file <input type="file" id="file" name="file"></label>
+          <button type="button" id="file-clear" hidden>Bỏ file</button>
+        </div>
+        <span class="hint" id="file-info">Chọn, kéo thả, hoặc dán. Ảnh (jpg/png/webp) gửi dạng photo, còn lại gửi dạng file. Tối đa 20 MB.</span>
+        <img id="preview" alt="Ảnh sắp gửi" hidden>
+      </div>
+      <p class="warn">Tin gửi thật, người nhận thấy tên cậu như khi cậu gõ trong app.</p>
+      <button class="primary" id="send-btn" type="submit">Gửi</button>
+    </form>
+    <div id="result" aria-live="polite"></div>
+    <div class="bar"><h2>Chat gần đây</h2><button type="button" id="reload">Tải lại</button></div>
+    <ul id="dialogs"></ul>
+  </aside>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const items = [];
+
+function row(item) {
+  const li = document.createElement("li");
+  const s = item.summary || {};
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const t = document.createElement("span"); t.className = "type"; t.textContent = item.type;
+  const time = document.createElement("span"); time.textContent = item.received_at;
+  meta.append(t, time);
+  if (s.is_message) {
+    const dir = document.createElement("span");
+    dir.className = s.out ? "dir-out" : "dir-in";
+    dir.textContent = s.out ? "đi ra" : "đến từ " + (s.from || s.from_id || "?");
+    meta.append(dir);
+  }
+  li.append(meta);
+  if (s.text) {
+    const p = document.createElement("p"); p.className = "text"; p.textContent = s.text; li.append(p);
+  }
+  if (s.media) li.append(mediaNode(s.media));
+  const d = document.createElement("details");
+  const sum = document.createElement("summary"); sum.textContent = "Payload thô (JSON)";
+  const pre = document.createElement("pre"); pre.textContent = JSON.stringify(item.payload, null, 2);
+  d.append(sum, pre);
+  li.append(d);
+  return li;
+}
+
+function mediaNode(m) {
+  const size = m.size ? " · " + (m.size / 1024).toFixed(0) + " KB" : "";
+  if (m.mime && m.mime.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.className = "thumb"; img.loading = "lazy"; img.src = m.url;
+    img.alt = "Ảnh (" + m.kind + size + ")";
+    return img;
+  }
+  const a = document.createElement("a");
+  a.className = "file-link"; a.href = m.url; a.target = "_blank"; a.rel = "noopener";
+  a.textContent = "Mở " + m.kind + (m.name ? ": " + m.name : "") + (m.mime ? " (" + m.mime + ")" : "") + size;
+  return a;
+}
+
+let pendingFile = null;
+function setFile(f) {
+  pendingFile = f;
+  const prev = $("preview");
+  if (prev.src) URL.revokeObjectURL(prev.src);
+  if (f && f.type.startsWith("image/")) { prev.src = URL.createObjectURL(f); prev.hidden = false; }
+  else { prev.removeAttribute("src"); prev.hidden = true; }
+  $("file-clear").hidden = !f;
+  $("file-info").textContent = f ? f.name + " · " + (f.size / 1024).toFixed(0) + " KB" + (f.size > 20 * 1024 * 1024 ? " (quá 20 MB, sẽ bị từ chối)" : "")
+    : "Chọn, kéo thả, hoặc dán. Ảnh (jpg/png/webp) gửi dạng photo, còn lại gửi dạng file. Tối đa 20 MB.";
+  if (!f) $("file").value = "";
+}
+
+function render() {
+  const onlyMsg = $("only-msg").checked;
+  const shown = items.filter((i) => !onlyMsg || (i.summary && i.summary.is_message));
+  $("feed").replaceChildren(...shown.map(row).reverse());
+  $("count").textContent = shown.length + (onlyMsg ? " / " + items.length : "");
+  $("empty").hidden = shown.length > 0;
+}
+
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.onopen = () => { $("status").textContent = "stream: đang nghe"; $("status").className = "pill live"; };
+  es.onerror = () => { $("status").textContent = "stream: mất kết nối, đang thử lại"; $("status").className = "pill down"; };
+  es.onmessage = (e) => {
+    items.push(JSON.parse(e.data));
+    render();
+    const first = $("feed").firstElementChild;
+    if (first) first.classList.add("new");
+  };
+}
+
+async function loadMe() {
+  try {
+    const r = await fetch("/api/me"); const u = await r.json();
+    $("me").textContent = "đăng nhập: " + u.name + (u.username ? " (@" + u.username + ")" : "");
+  } catch { $("me").textContent = "không đọc được account"; }
+}
+
+async function loadDialogs() {
+  $("dialogs").replaceChildren();
+  try {
+    const list = await (await fetch("/api/dialogs")).json();
+    for (const d of list) {
+      const li = document.createElement("li");
+      const b = document.createElement("button"); b.type = "button";
+      const name = document.createElement("span"); name.textContent = d.name || d.id;
+      const info = document.createElement("span"); info.className = "hint";
+      info.textContent = d.kind + (d.unread ? " · " + d.unread + " chưa đọc" : "");
+      b.append(name, info);
+      b.onclick = () => { $("chat").value = d.username ? "@" + d.username : String(d.id); $("text").focus(); };
+      li.append(b); $("dialogs").append(li);
+    }
+  } catch { $("dialogs").textContent = "Không tải được danh sách chat."; }
+}
+
+async function send(e) {
+  e.preventDefault();
+  const btn = $("send-btn"); btn.disabled = true; btn.textContent = "Đang gửi…";
+  $("result").replaceChildren();
+  try {
+    const fd = new FormData();
+    fd.append("chat", $("chat").value);
+    fd.append("text", $("text").value);
+    if (pendingFile) fd.append("file", pendingFile, pendingFile.name || "pasted.png");
+    const r = await fetch("/api/send", { method: "POST", body: fd });
+    const body = await r.json();
+    if (body.ok) {
+      const p = document.createElement("p"); p.textContent = "Đã gửi. Payload Telegram trả về:";
+      const pre = document.createElement("pre"); pre.textContent = JSON.stringify(body.payload, null, 2);
+      $("result").append(p, pre); $("text").value = ""; setFile(null);
+    } else {
+      const p = document.createElement("p"); p.className = "err"; p.textContent = "Lỗi: " + body.error; $("result").append(p);
+    }
+  } catch (err) {
+    const p = document.createElement("p"); p.className = "err"; p.textContent = "Không gọi được server: " + err; $("result").append(p);
+  } finally { btn.disabled = false; btn.textContent = "Gửi"; }
+}
+
+$("send-form").addEventListener("submit", send);
+$("file").addEventListener("change", (e) => setFile(e.target.files[0] || null));
+$("file-clear").addEventListener("click", () => setFile(null));
+$("text").addEventListener("paste", (e) => {
+  const f = [...e.clipboardData.files][0];
+  if (f) { e.preventDefault(); setFile(f); }
+});
+const drop = $("drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); setFile(e.dataTransfer.files[0] || null); });
+$("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) $("send-form").requestSubmit(); });
+$("only-msg").addEventListener("change", render);
+$("clear").addEventListener("click", () => { items.length = 0; render(); });
+$("reload").addEventListener("click", loadDialogs);
+loadMe(); loadDialogs(); connect(); render();
+</script>
+</body>
+</html>
