@@ -6,8 +6,17 @@
 captain-cli ──┬──> captain-format ────> captain-core
               ├──> captain-protocol ──┬─> captain-core
               │                       └─> captain-vault
+              ├──> captain-inbox ─────> captain-core
+              ├──> captain-store ──┬──> captain-core
+              │                    └──> captain-inbox
+              ├──> captain-ipc ───────> captain-core
               └──> captain-vault
 ```
+
+`captain-inbox` is the pure inbox logic: scope, triggers, coalescing, triage and the report
+math. It does no I/O and takes time as an argument. `captain-store` is the SQLite store and
+depends on `captain-inbox` for its types. `captain-ipc` frames the daemon's socket protocol.
+`docs/design/README.md` explains each of them.
 
 `captain-core` defines what a message is, independent of any Telegram library. Everything else
 converts to or from it.
@@ -56,17 +65,28 @@ sensitivity:
 | Datacenter addresses | state file | immediately on change |
 | Peer cache, update position | state file | every 30 s and on close |
 
+grammers keeps the update position in memory and gives it to the session only when asked.
+`Connection::next_event` asks after every update, so the 30 s flush writes a current position
+and a crash replays at most about 30 s of updates. The daemon skips replayed messages that are
+already in the store.
+
 The unit tests in `session.rs` check that an auth key never reaches the state file.
 
 ## Known gaps
 
 - Only plain text in layer 2.
 - Videos, voice notes and stickers are received and downloadable, but sent only as generic files.
-- No per-chat filter or on/off switch yet. `listen` prints every update.
 - Nothing has run against a live account yet. The first `captain auth login` is the real test.
+- P1 of the inbox is built: daemon, store, scope, triggers, tickets, metrics and the monitoring
+  UI. The Claude runner, context tools and drafts (P2) are designed in `docs/design/` and not
+  built; they wait on the API terms decision in `docs/design/risks.md`.
 
-The planned daemon, scope gate, triggers, tickets and Claude drafts are designed in
-`docs/design/`, starting with `docs/design/README.md`. None of it is built yet.
+## Daemon
+
+`captain daemon` owns the session. One task owns the `Connection` and only calls
+`next_event`, because grammers' update stream loses updates when a read is cancelled midway.
+Sends and fetches go through `captain_protocol::Handle`, a cloneable client that the other
+tasks share. `docs/design/daemon.md` has the task list and failure handling.
 
 ## Build size
 

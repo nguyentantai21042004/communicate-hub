@@ -60,6 +60,7 @@ himself.
 | Triggers and coalescing | `captain-inbox::trigger` | [triggers.md](triggers.md) | P1 |
 | Triage and tickets | `captain-inbox::ticket` | [tickets.md](tickets.md) | P1 |
 | Metrics | `captain-store` tables, `captain report` | [metrics-p1.md](metrics-p1.md) | P1 |
+| Monitoring UI | `captain daemon`, `captain ui` | [monitor.md](monitor.md) | P1 |
 | Context tools | `captain mcp` | [context-tools.md](context-tools.md) | P2 |
 | Runner | `captain daemon` | [runner.md](runner.md) | P2 |
 | Review and outcomes | `captain-protocol` drafts, `captain-inbox::outcome` | [review.md](review.md) | P2 |
@@ -71,7 +72,8 @@ himself.
 
 ```
 captain-cli ──┬──> captain-inbox ─────> captain-core
-              ├──> captain-store ─────> captain-core
+              ├──> captain-store ──┬──> captain-core
+              │                    └──> captain-inbox
               ├──> captain-ipc ───────> captain-core
               ├──> captain-protocol ──┬─> captain-core
               │                       └─> captain-vault
@@ -83,7 +85,9 @@ captain-cli ──┬──> captain-inbox ─────> captain-core
   outcome matching. It does no I/O, reads no clock (time is passed in), and depends on no
   Telegram or SQLite library. Everything it needs to know, such as "is the replied-to message
   one of mine", arrives as an input the daemon looked up.
-- `captain-store` owns SQLite and knows nothing about grammers.
+- `captain-store` owns SQLite and knows nothing about grammers. It uses `captain-inbox` types
+  (ticket states, labels, thread keys) and builds the report input that `captain-inbox` turns
+  into numbers.
 - `captain-ipc` defines the socket protocol as core types plus request and response enums.
 - The daemon, the MCP server and the CLI are subcommands of the one `captain` binary in
   `apps/captain-cli`, the only place allowed to depend on everything.

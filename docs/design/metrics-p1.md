@@ -35,7 +35,7 @@ Each question maps to a decision that is blocked until it has an answer.
 |---|---|---|
 | `messages.date`, `messages.received_at` | Update lag, inter-arrival gaps, Tài's reply times | store |
 | `tickets`, `ticket_events`, `ticket_messages` | Volume, routes, burst size and span, labels | pipeline |
-| `daemon_runs`, `coverage` | Uptime, gaps, catch-up | coverage |
+| `daemon_runs` | Uptime, gaps, catch-up | daemon |
 | `gate_drops` | Out-of-scope volume and candidates | scope curation |
 | `metric_events` | The rest, listed below | metrics only |
 
@@ -51,6 +51,10 @@ Each question maps to a decision that is blocked until it has an answer.
 | `context_shape` | A ticket closes | reply chain depth | age of the oldest message in the chain, secs | `quote`, `media`, `both`, `none` |
 | `context_density` | A ticket closes | messages on the key in the prior hour | messages on the key in the prior 24 h | |
 | `store_size` | Daily | database bytes | message rows | |
+| `outgoing_dm` | Tài sends a DM, in or out of scope | | | |
+
+`outgoing_dm` stores only the recipient and the time. It is how the resolver tells
+`answered_elsewhere` apart from `read_only` when the DM is outside scope.
 
 `context_shape` and `context_density` are computed from the store at close time. They answer Q5
 without running a model: how far back a triggered message reaches, and how busy its thread is.
@@ -70,10 +74,10 @@ Implicit, set by the hourly resolver 24 hours after the anchor (see
 `answered` is the proxy for "a draft would have been useful". It overcounts ("ok" replies) and
 undercounts (answers given in a call), which is why an explicit sample exists.
 
-Explicit, optional: `captain tickets review` walks the last day's tickets, showing chat label,
-trigger kind and the first line of the anchor in the terminal. One key per ticket: `w` would
-want a draft, `n` noise, `s` skip. The target is about 50 labelled tickets over the period, or
-all of them if volume is lower.
+Explicit, optional: the Tickets screen of the [monitoring UI](monitor.md) has a Not labelled by
+me filter and Want, Noise and Skip buttons on each ticket. `captain ticket label <id> want`
+does the same from a terminal. The target is about 50 labelled tickets over the period, or all
+of them if volume is lower.
 
 ## Metrics
 
@@ -92,7 +96,7 @@ all of them if volume is lower.
 | M11 | Thread density | p50, p90 of `context_density` | Q5 |
 | M12 | Time to read | Anchor `date` to the first `read_advanced` covering it, p50 and p90 per source | Q6 |
 | M13 | Time to reply | Anchor `date` to Tài's first message on the key, p50 and p90 per source | Q6 |
-| M14 | Uptime | Connected time over wall time, from `daemon_runs` and `coverage` | Q7 |
+| M14 | Uptime | Connected time over wall time, from `daemon_runs` | Q7 |
 | M15 | Coverage gaps | Count and total length of gaps that catch-up did not fill | Q7 |
 | M16 | Update lag | p50, p99 of `received_at - date` for live messages | Q7 |
 | M17 | API pressure | `flood_wait` count and seconds, `rpc_error` count, per method | Q7 |
@@ -147,11 +151,11 @@ the answer is not the expected one.
 
 1. `MessageView` and `EventKind` fields from [README.md](README.md#changes-to-existing-crates).
 2. Daemon with the session lock and socket; `send`, `download`, `listen` through it.
-3. Store with `messages`, `chats`, `coverage`, `daemon_runs`, retention.
+3. Store with `messages`, `chats`, `daemon_runs`, retention.
 4. Scope gate and `gate_drops`, `captain chats`, `pause` and `resume`.
 5. Triggers, coalescing, triage, tickets.
 6. `metric_events` and the resolver job.
-7. `captain report` and `captain tickets review`.
+7. `captain report` and the monitoring UI.
 
 Metrics start counting on the day step 5 ships. The 14 days run from then.
 

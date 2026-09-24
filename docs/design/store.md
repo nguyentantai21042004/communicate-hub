@@ -32,10 +32,12 @@ Columns listed are the ones decisions depend on; the migration adds bookkeeping 
 |---|---|---|---|
 | `chats` | `chat_id` | kind, title, username, first_seen, last_seen | while in scope |
 | `messages` | `chat_id, msg_id` | topic_id, sender_id, sender_is_bot, outgoing, date, received_at, edit_date, reply_to_msg_id, quote_text, mentioned, album_id, text, media_kind, deleted_at | text 30 days, then row deleted |
-| `coverage` | `chat_id, from_ts` | to_ts, source (live, catch-up) | 30 days |
+| `coverage` (P2) | `chat_id, from_ts` | to_ts, source (live, catch-up) | 30 days |
 | `tickets` | `ticket_id` | chat_id, topic_id, trigger, route, state, opened_at, closed_at, resolved_at, label_implicit, label_explicit | 180 days, ids and labels only |
 | `ticket_messages` | `ticket_id, msg_id` | role (anchor, seed, burst) | with ticket |
 | `ticket_events` | `ticket_id, seq` | at, from_state, to_state, reason | with ticket |
+| `ticket_senders` | `ticket_id, sender_id` | | with ticket |
+| `settings` | `key` | value, such as the pause flag | kept |
 | `drafts` (P2) | `draft_id` | ticket_id, chat_id, topic_id, reply_to, text, text_hash, saved_at, outcome, outcome_at, edit_ratio | text 30 days |
 | `runs` (P2) | `run_id` | ticket_id, claude_session_id, started_at, ended_at, tool_calls, messages_pulled, used_ids, tokens_in, tokens_out, cost_usd, exit | 180 days |
 | `metric_events` | `seq` | at, kind, chat_id, topic_id, ticket_id, value_a, value_b, tag | 180 days, never text |
@@ -55,6 +57,10 @@ described in [metrics-p1.md](metrics-p1.md).
 - Retention runs nightly. Deleting text deletes it; there is no soft copy.
 
 ## Coverage
+
+P1 does not build the `coverage` table. Uptime and gaps (M14, M15) come from `daemon_runs`,
+whose end time a heartbeat moves forward every minute, so a crash still leaves a close end.
+Context tools in P2 need per-chat coverage, and it lands with them.
 
 A context pull needs to know whether the store has every message in a range or only some.
 
