@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Captain</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="brand">
+      <span class="brand-name">Captain</span>
+      <span class="brand-profile" id="profile"></span>
+    </div>
+    <div class="status" id="status" aria-live="polite">
+      <span class="pill pill-muted">Loading status</span>
+    </div>
+    <button class="btn" id="pause" type="button" disabled>Pause</button>
+  </header>
+
+  <nav class="tabs" aria-label="Sections">
+    <a href="#tickets" data-view="tickets">Tickets</a>
+    <a href="#metrics" data-view="metrics">Metrics</a>
+    <a href="#scope" data-view="scope">Scope</a>
+    <a href="#health" data-view="health">Health</a>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <section id="view-tickets" class="view" aria-labelledby="h-tickets" hidden>
+      <div class="view-head">
+        <h1 id="h-tickets">Tickets</h1>
+        <button class="btn btn-quiet" id="tickets-refresh" type="button">Refresh</button>
+      </div>
+      <form class="filters" id="filters">
+        <label>State
+          <select name="state">
+            <option value="">Any</option>
+            <option value="queued">Queued</option>
+            <option value="digest">Digest</option>
+            <option value="resolved">Resolved</option>
+            <option value="skipped">Skipped</option>
+          </select>
+        </label>
+        <label>Trigger
+          <select name="trigger">
+            <option value="">Any</option>
+            <option value="dm_all">Direct message</option>
+            <option value="mention">Mention</option>
+            <option value="reply_to_me">Reply to me</option>
+            <option value="keyword">Keyword</option>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <label>Opened in
+          <select name="days">
+            <option value="1">Last day</option>
+            <option value="7" selected>Last 7 days</option>
+            <option value="14">Last 14 days</option>
+            <option value="30">Last 30 days</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" name="unlabelled"> Not labelled by me</label>
+      </form>
+      <div class="split">
+        <div class="list-pane">
+          <p class="list-count" id="ticket-count" aria-live="polite"></p>
+          <ul class="tickets" id="ticket-list" aria-label="Tickets"></ul>
+        </div>
+        <aside class="detail-pane" id="detail" aria-label="Ticket detail" hidden></aside>
+      </div>
+    </section>
+
+    <section id="view-metrics" class="view" aria-labelledby="h-metrics" hidden>
+      <div class="view-head">
+        <h1 id="h-metrics">Metrics</h1>
+        <label class="inline">Window
+          <select id="report-days">
+            <option value="7">7 days</option>
+            <option value="14" selected>14 days</option>
+            <option value="30">30 days</option>
+          </select>
+        </label>
+      </div>
+      <div id="metrics-body"></div>
+    </section>
+
+    <section id="view-scope" class="view" aria-labelledby="h-scope" hidden>
+      <div class="view-head">
+        <h1 id="h-scope">Scope</h1>
+        <button class="btn btn-quiet" id="scope-reload" type="button">Reload files</button>
+      </div>
+      <div id="scope-body"></div>
+    </section>
+
+    <section id="view-health" class="view" aria-labelledby="h-health" hidden>
+      <div class="view-head">
+        <h1 id="h-health">Health</h1>
+      </div>
+      <div id="health-body"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
