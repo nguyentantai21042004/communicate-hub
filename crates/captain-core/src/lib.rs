@@ -14,7 +14,10 @@ pub mod text;
 
 pub use error::{Error, Result};
 pub use ids::{ChatId, ChatRef, MessageId};
-pub use inbound::{ChatKind, ChatSummary, EventKind, InboundEvent, MediaSummary, MessageView};
+pub use inbound::{
+    ChatKind, ChatSummary, DialogSummary, EventKind, ForwardOrigin, InboundEvent, MediaSummary,
+    MessageView,
+};
 pub use outbound::{
     Content, MediaItem, MediaKind, MediaSource, OutgoingMessage, PhotoQuality, SendOptions,
     SentMessage,

@@ -7,10 +7,12 @@
 mod connection;
 mod entities;
 mod error;
+mod handle;
 mod inbound;
 mod outbound;
 mod session;
 
 pub use connection::{Connection, LoginPrompt};
 pub use error::{Error, Result};
+pub use handle::Handle;
 pub use session::{KeychainSession, SessionError};

@@ -33,7 +33,18 @@ pub enum EventKind {
         /// Deleted message ids.
         ids: Vec<MessageId>,
     },
-    /// Any other update (typing, read receipts, online status). Only `raw` describes it.
+    /// The account read a chat up to `max_id`, on any of its devices.
+    ReadInbox {
+        /// Chat that was read.
+        chat: ChatId,
+        /// Forum topic or comment thread, when Telegram reports one.
+        topic: Option<MessageId>,
+        /// Highest message id now read.
+        max_id: MessageId,
+        /// Messages still unread afterwards, when Telegram reports it.
+        still_unread: Option<i32>,
+    },
+    /// Any other update (typing, outgoing read receipts, online status). Only `raw` describes it.
     Other,
 }
 
@@ -54,10 +65,40 @@ pub struct MessageView {
     pub text: FormattedText,
     /// Attached media, if any.
     pub media: Option<MediaSummary>,
-    /// Message this one replies to.
+    /// Message this one replies to. In a forum this is `None` for a plain message in a topic,
+    /// even though Telegram points its reply header at the topic's first message.
     pub reply_to: Option<MessageId>,
     /// Shared by every message of one album; `None` for standalone messages.
     pub album_id: Option<i64>,
+    /// Whether the message mentions this account, by `@username` or by name.
+    #[serde(default)]
+    pub mentioned: bool,
+    /// Forum topic the message belongs to, as the id of the topic's first message. `None`
+    /// outside forums and in a forum's General topic.
+    #[serde(default)]
+    pub topic: Option<MessageId>,
+    /// The part of the replied-to message the sender quoted, if any.
+    #[serde(default)]
+    pub quote_text: Option<String>,
+    /// Where a forwarded message came from.
+    #[serde(default)]
+    pub forward: Option<ForwardOrigin>,
+    /// Last edit time, Unix seconds.
+    #[serde(default)]
+    pub edited_at_unix: Option<i64>,
+}
+
+/// Origin of a forwarded message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardOrigin {
+    /// Original sender, when they allow linking forwards to their account.
+    pub from: Option<ChatId>,
+    /// Original send time, Unix seconds.
+    pub date_unix: i64,
+    /// Chat the original message is in. Telegram sets it only on forwards into Saved Messages.
+    pub saved_from_chat: Option<ChatId>,
+    /// Original message id in `saved_from_chat`.
+    pub saved_from_message: Option<MessageId>,
 }
 
 /// Identity of a chat or user.
@@ -71,6 +112,22 @@ pub struct ChatSummary {
     pub name: Option<String>,
     /// Public username without `@`, when it has one.
     pub username: Option<String>,
+    /// Whether this is a bot account.
+    #[serde(default)]
+    pub is_bot: bool,
+}
+
+/// One entry of the account's chat list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DialogSummary {
+    /// The chat.
+    pub chat: ChatSummary,
+    /// Whether the chat is a forum with topics.
+    pub forum: bool,
+    /// Unread messages.
+    pub unread_count: i32,
+    /// Time of the last message, Unix seconds.
+    pub last_message_unix: Option<i64>,
 }
 
 /// Kind of a chat.

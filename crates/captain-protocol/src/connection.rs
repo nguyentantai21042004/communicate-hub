@@ -9,8 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use captain_core::{
-    ChatId, ChatKind, ChatRef, ChatSummary, InboundEvent, MessageId, OutgoingMessage, Protocol,
-    SentMessage,
+    ChatId, ChatKind, ChatSummary, InboundEvent, MessageId, OutgoingMessage, Protocol, SentMessage,
 };
 use captain_vault::{Secret, Vault};
 use grammers_client::client::{SignInError, UpdateStream, UpdatesConfiguration};
@@ -22,8 +21,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 use crate::error::rpc;
+use crate::handle::Handle;
 use crate::inbound::{self, RawPayload};
-use crate::outbound::Outbound;
 use crate::session::KeychainSession;
 use crate::{Error, Result};
 
@@ -266,16 +265,45 @@ impl Connection {
             kind: ChatKind::User,
             name: Some(user.full_name()),
             username: user.username().map(str::to_owned),
+            is_bot: user.is_bot(),
         }
     }
 
-    async fn outbound(&self) -> Result<Outbound<'_>> {
+    /// Caches the access hash of every chat in the dialog list, and returns how many chats it
+    /// saw. Call it after [`Self::listen`] and before reading updates.
+    ///
+    /// TELEGRAM: filling a gap in a supergroup or channel needs its access hash, and grammers
+    /// only caches hashes from requests such as `messages.getDialogs`, never from updates.
+    /// Without this, catch-up silently skips any supergroup the session has not fetched.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotAuthorized`] before login, [`Error::Rpc`] when `messages.getDialogs` fails.
+    pub async fn cache_peers(&self) -> Result<usize> {
+        let seen = self.handle()?.cache_peers().await?;
+        // Listing dialogs also stores each channel's current position in the session, which
+        // would skip that channel's catch-up after a crash. Put the stream's position back.
+        if let Some(stream) = &self.stream
+            && let Err(e) = stream.sync_update_state().await
+        {
+            tracing::warn!(error = %e, "could not record the update position");
+        }
+        Ok(seen)
+    }
+
+    /// Returns a handle for sends and fetches that other tasks can hold while this connection
+    /// reads updates.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotAuthorized`] before [`Self::me`] or [`Self::login`] has succeeded.
+    pub fn handle(&self) -> Result<Handle> {
         let self_id = self
             .self_id
             .ok_or_else(|| Error::NotAuthorized(self.vault.profile().to_string()))?;
-        Ok(Outbound {
-            client: &self.client,
-            session: &self.session,
+        Ok(Handle {
+            client: self.client.clone(),
+            session: Arc::clone(&self.session),
             self_id,
         })
     }
@@ -298,6 +326,12 @@ impl Protocol for Connection {
             Err(InvocationError::Dropped) => return Ok(None),
             Err(e) => return Err(rpc("updates.getDifference")(e)),
         };
+        // grammers hands the update position to the session only when asked. Without this a
+        // crash would replay everything since the last clean close; with it, at most what
+        // arrived since the last periodic flush.
+        if let Err(e) = stream.sync_update_state().await {
+            tracing::warn!(error = %e, "could not record the update position");
+        }
         let payload = RawPayload::capture(&raw);
         let update = Update::from_raw(&self.client, raw, state, peers);
         Ok(Some(inbound::to_event(
@@ -309,26 +343,11 @@ impl Protocol for Connection {
     }
 
     async fn send(&self, message: OutgoingMessage) -> Result<Vec<SentMessage>> {
-        self.outbound().await?.send(message).await
+        self.handle()?.send(message).await
     }
 
     async fn download_media(&self, chat: ChatId, message: MessageId) -> Result<Option<Vec<u8>>> {
-        let outbound = self.outbound().await?;
-        let peer = outbound.resolve(&ChatRef::Id(chat)).await?;
-        let found = self
-            .client
-            .get_messages_by_id(peer, &[message.0])
-            .await
-            .map_err(rpc("messages.getMessages"))?;
-        let Some(media) = found.into_iter().flatten().next().and_then(|m| m.media()) else {
-            return Ok(None);
-        };
-        let mut download = self.client.iter_download(&media);
-        let mut bytes = Vec::new();
-        while let Some(chunk) = download.next().await.map_err(rpc("upload.getFile"))? {
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(Some(bytes))
+        self.handle()?.download_media(chat, message).await
     }
 }
 

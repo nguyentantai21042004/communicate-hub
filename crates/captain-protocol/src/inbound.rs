@@ -4,7 +4,8 @@
 //! payload Telegram sent, including fields this layer does not normalize.
 
 use captain_core::{
-    ChatId, ChatKind, ChatSummary, EventKind, InboundEvent, MediaSummary, MessageId, MessageView,
+    ChatId, ChatKind, ChatSummary, EventKind, ForwardOrigin, InboundEvent, MediaSummary, MessageId,
+    MessageView,
 };
 use grammers_client::peer::Peer;
 use grammers_client::session::types::{PeerId, PeerKind};
@@ -47,6 +48,7 @@ pub(crate) fn to_event(
                 .map(|p| chat_id(p, self_id)),
             ids: d.messages().iter().copied().map(MessageId).collect(),
         },
+        Update::Raw(r) => read_inbox(&r.raw, self_id).unwrap_or(EventKind::Other),
         _ => EventKind::Other,
     };
     InboundEvent {
@@ -61,6 +63,11 @@ pub(crate) fn to_event(
 /// way.
 pub(crate) fn message_view(m: &grammers_client::message::Message, self_id: i64) -> MessageView {
     let chat_peer = m.peer_id();
+    let reply = m.reply_header().and_then(|h| match h {
+        tl::enums::MessageReplyHeader::Header(h) => Some(h),
+        tl::enums::MessageReplyHeader::MessageReplyStoryHeader(_) => None,
+    });
+    let place = reply.as_ref().map(reply_place).unwrap_or_default();
     MessageView {
         chat: summary(chat_peer, m.peer(), self_id),
         id: MessageId(m.id()),
@@ -69,8 +76,82 @@ pub(crate) fn message_view(m: &grammers_client::message::Message, self_id: i64) 
         date_unix: m.date().timestamp(),
         text: entities::from_tl(m.text(), m.fmt_entities()),
         media: raw_media(&m.raw).and_then(media_summary),
-        reply_to: m.reply_to_message_id().map(MessageId),
+        reply_to: place.reply_to,
         album_id: m.grouped_id(),
+        mentioned: m.mentioned(),
+        topic: place.topic,
+        quote_text: reply.and_then(|h| h.quote_text),
+        forward: m.forward_header().map(|h| forward_origin(&h, self_id)),
+        edited_at_unix: m.edit_date().map(|d| d.timestamp()),
+    }
+}
+
+/// Where a message sits relative to other messages: the message it replies to, and its topic.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReplyPlace {
+    reply_to: Option<MessageId>,
+    topic: Option<MessageId>,
+}
+
+/// TELEGRAM: in a forum, `forum_topic` is set on every message inside a topic. A plain message
+/// in topic T points `reply_to_msg_id` at T; a reply inside T points `reply_to_msg_id` at the
+/// replied message and `reply_to_top_id` at T. See <https://core.telegram.org/api/forum>.
+fn reply_place(h: &tl::types::MessageReplyHeader) -> ReplyPlace {
+    let msg = h.reply_to_msg_id.map(MessageId);
+    if !h.forum_topic {
+        return ReplyPlace {
+            reply_to: msg,
+            topic: None,
+        };
+    }
+    match h.reply_to_top_id {
+        Some(top) => ReplyPlace {
+            reply_to: msg,
+            topic: Some(MessageId(top)),
+        },
+        None => ReplyPlace {
+            reply_to: None,
+            topic: msg,
+        },
+    }
+}
+
+fn forward_origin(h: &tl::enums::MessageFwdHeader, self_id: i64) -> ForwardOrigin {
+    let tl::enums::MessageFwdHeader::Header(h) = h;
+    let marked = |p: &tl::enums::Peer| chat_id(PeerId::from(p.clone()), self_id);
+    ForwardOrigin {
+        from: h.from_id.as_ref().map(marked),
+        date_unix: i64::from(h.date),
+        saved_from_chat: h.saved_from_peer.as_ref().map(marked),
+        saved_from_message: h.saved_from_msg_id.map(MessageId),
+    }
+}
+
+/// Read-inbox updates, which grammers only passes through as raw updates.
+fn read_inbox(update: &tl::enums::Update, self_id: i64) -> Option<EventKind> {
+    use tl::enums::Update as U;
+
+    let channel = |id: i64| PeerId::channel(id).map(|p| chat_id(p, self_id));
+    match update {
+        U::ReadHistoryInbox(u) => Some(EventKind::ReadInbox {
+            chat: chat_id(PeerId::from(u.peer.clone()), self_id),
+            topic: u.top_msg_id.map(MessageId),
+            max_id: MessageId(u.max_id),
+            still_unread: Some(u.still_unread_count),
+        }),
+        U::ReadChannelInbox(u) => Some(EventKind::ReadInbox {
+            chat: channel(u.channel_id)?,
+            topic: None,
+            max_id: MessageId(u.max_id),
+            still_unread: Some(u.still_unread_count),
+        }),
+        U::ReadChannelDiscussionInbox(u) => Some(EventKind::ReadInbox {
+            chat: channel(u.channel_id)?,
+            topic: Some(MessageId(u.top_msg_id)),
+            max_id: MessageId(u.read_max_id),
+            still_unread: None,
+        }),
+        _ => None,
     }
 }
 
@@ -79,7 +160,7 @@ pub(crate) fn chat_id(peer: PeerId, self_id: i64) -> ChatId {
     ChatId(peer.bot_api_dialog_id().unwrap_or(self_id))
 }
 
-fn summary(id: PeerId, peer: Option<&Peer>, self_id: i64) -> ChatSummary {
+pub(crate) fn summary(id: PeerId, peer: Option<&Peer>, self_id: i64) -> ChatSummary {
     ChatSummary {
         id: chat_id(id, self_id),
         kind: match id.kind() {
@@ -89,6 +170,7 @@ fn summary(id: PeerId, peer: Option<&Peer>, self_id: i64) -> ChatSummary {
         },
         name: peer.and_then(Peer::name).map(str::to_owned),
         username: peer.and_then(Peer::username).map(str::to_owned),
+        is_bot: matches!(peer, Some(Peer::User(u)) if u.is_bot()),
     }
 }
 
@@ -207,6 +289,60 @@ mod tests {
     #[test]
     fn empty_media_is_no_media() {
         assert!(media_summary(&tl::enums::MessageMedia::Empty).is_none());
+    }
+
+    fn header(forum: bool, msg: Option<i32>, top: Option<i32>) -> tl::types::MessageReplyHeader {
+        tl::types::MessageReplyHeader {
+            reply_to_scheduled: false,
+            forum_topic: forum,
+            quote: false,
+            reply_to_ephemeral: false,
+            reply_to_msg_id: msg,
+            reply_to_peer_id: None,
+            reply_from: None,
+            reply_media: None,
+            reply_to_top_id: top,
+            quote_text: None,
+            quote_entities: None,
+            quote_offset: None,
+            todo_item_id: None,
+            poll_option: None,
+        }
+    }
+
+    #[test]
+    fn topic_messages_are_not_replies_to_the_topic_root() {
+        let plain = reply_place(&header(true, Some(40), None));
+        assert_eq!(plain.reply_to, None);
+        assert_eq!(plain.topic, Some(MessageId(40)));
+
+        let reply = reply_place(&header(true, Some(55), Some(40)));
+        assert_eq!(reply.reply_to, Some(MessageId(55)));
+        assert_eq!(reply.topic, Some(MessageId(40)));
+
+        let normal = reply_place(&header(false, Some(7), None));
+        assert_eq!(normal.reply_to, Some(MessageId(7)));
+        assert_eq!(normal.topic, None);
+    }
+
+    #[test]
+    fn read_updates_become_read_inbox_events() {
+        let update = tl::enums::Update::ReadChannelInbox(tl::types::UpdateReadChannelInbox {
+            folder_id: None,
+            channel_id: 1234,
+            max_id: 90,
+            still_unread_count: 2,
+            pts: 1,
+        });
+        assert_eq!(
+            read_inbox(&update, 1),
+            Some(EventKind::ReadInbox {
+                chat: ChatId(-1_000_000_001_234),
+                topic: None,
+                max_id: MessageId(90),
+                still_unread: Some(2),
+            })
+        );
     }
 
     #[test]
