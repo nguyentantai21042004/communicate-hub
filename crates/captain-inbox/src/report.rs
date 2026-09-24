@@ -167,6 +167,9 @@ pub struct ReportInput {
     pub shapes: Vec<ContextShape>,
     /// Daemon runs overlapping the window.
     pub runs: Vec<RunSpan>,
+    /// Start of the oldest recorded run. Time before it is not downtime, since there was no
+    /// daemon yet.
+    pub first_run_at: Option<i64>,
     /// Receive time minus send time, for live messages.
     pub update_lags_secs: Vec<i64>,
     /// API errors.
@@ -867,8 +870,12 @@ impl<'a> Ctx<'a> {
     #[expect(clippy::cast_precision_loss, reason = "seconds stay far below 2^52")]
     fn m14(&mut self) -> Metric {
         let spans = self.up_spans();
+        let watched_from = self
+            .input
+            .first_run_at
+            .map_or(self.input.since, |first| first.max(self.input.since));
         let mut covered = 0;
-        let mut cursor = self.input.since;
+        let mut cursor = watched_from;
         for (a, b) in &spans {
             let start = (*a).max(cursor);
             if *b > start {
@@ -876,7 +883,7 @@ impl<'a> Ctx<'a> {
                 cursor = *b;
             }
         }
-        let window = (self.input.until - self.input.since).max(1);
+        let window = (self.input.until - watched_from).max(1);
         let uptime = (!spans.is_empty()).then(|| covered as f64 / window as f64);
         let gaps = self.gaps();
         let state = match uptime {
@@ -1260,6 +1267,25 @@ mod tests {
         assert_eq!(metric(&r, "M14").summary[0].value, Some(0.8));
         assert_eq!(metric(&r, "M15").summary[0].value, Some(1.0));
         assert_eq!(rule(&r, "uptime_low")[0].state, RuleState::Fires);
+    }
+
+    #[test]
+    fn uptime_ignores_the_time_before_the_first_run() {
+        let r = build(
+            &ReportInput {
+                since: 0,
+                until: 100,
+                runs: vec![RunSpan {
+                    started_at: 60,
+                    stopped_at: 100,
+                }],
+                first_run_at: Some(60),
+                ..ReportInput::default()
+            },
+            &Policy::default(),
+        );
+        assert_eq!(metric(&r, "M14").summary[0].value, Some(1.0));
+        assert_eq!(rule(&r, "uptime_low")[0].state, RuleState::Holds);
     }
 
     #[test]

@@ -225,7 +225,15 @@ impl App {
     pub async fn report(&self, within_secs: i64) -> Result<Value> {
         let until = now_unix();
         let since = until - within_secs.max(1);
-        let input = self.db.run(move |s| s.report_input(since, until)).await?;
+        let mut input = self.db.run(move |s| s.report_input(since, until)).await?;
+        if self.live.is_some() {
+            // The store only knows this run up to its last heartbeat, but it is still running.
+            for run in &mut input.runs {
+                if run.started_at == self.started_at {
+                    run.stopped_at = until;
+                }
+            }
+        }
         let policy = self.config().policy;
         Ok(json!(report::build(&input, &policy)))
     }

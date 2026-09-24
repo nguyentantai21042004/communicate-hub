@@ -96,7 +96,7 @@ of them if volume is lower.
 | M11 | Thread density | p50, p90 of `context_density` | Q5 |
 | M12 | Time to read | Anchor `date` to the first `read_advanced` covering it, p50 and p90 per source | Q6 |
 | M13 | Time to reply | Anchor `date` to Tài's first message on the key, p50 and p90 per source | Q6 |
-| M14 | Uptime | Connected time over wall time, from `daemon_runs` | Q7 |
+| M14 | Uptime | Connected time over wall time since the first recorded run, from `daemon_runs` | Q7 |
 | M15 | Coverage gaps | Count and total length of gaps that catch-up did not fill | Q7 |
 | M16 | Update lag | p50, p99 of `received_at - date` for live messages | Q7 |
 | M17 | API pressure | `flood_wait` count and seconds, `rpc_error` count, per method | Q7 |

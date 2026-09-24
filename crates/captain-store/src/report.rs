@@ -34,6 +34,11 @@ impl Store {
             answered: self.answered(since, until)?,
             shapes: self.shapes(since, until)?,
             runs: self.runs(since, until)?,
+            first_run_at: self.conn.query_row(
+                "SELECT min(started_at) FROM daemon_runs",
+                [],
+                |r| r.get(0),
+            )?,
             update_lags_secs: self.update_lags(since, until)?,
             api: self.api_events(since, until)?,
             store_sizes: self.store_sizes(since, until)?,
