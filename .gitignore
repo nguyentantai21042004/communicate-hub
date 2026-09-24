@@ -1,0 +1,12 @@
+/target/
+/refs/*/
+!/refs/README.md
+/.sc/
+.DS_Store
+# Python prototype
+__pycache__/
+.venv/
+*.session
+# Never commit credentials in any form
+.env
+*.env
