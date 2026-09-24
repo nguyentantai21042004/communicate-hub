@@ -55,3 +55,13 @@ doc_markdown = "warn"
 needless_pass_by_value = "warn"
 redundant_clone = "warn"
 semicolon_if_nothing_returned = "warn"
+
+# PERF: full debuginfo made target/ grow by about 1 GB per few builds. On macOS, rustc keeps one
+# object file per codegen unit next to each debug artifact, and never deletes stale ones.
+# Dependencies get no debuginfo; workspace crates keep line tables so backtraces still show
+# file:line.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

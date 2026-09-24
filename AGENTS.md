@@ -6,6 +6,8 @@ crates depend on each other.
 ## Before you finish
 
 - Run `make check`. It must pass with no warnings.
+- `make check` ends by trimming `target/` to its size cap. If you build with raw `cargo`
+  commands, the Stop hook trims it when you finish. Do not delete `target/` by hand.
 - Comments use only the tags in `docs/CONVENTIONS.md`. `scripts/lint-comments.sh` rejects the
   rest.
 

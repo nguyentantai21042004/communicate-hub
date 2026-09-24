@@ -10,3 +10,4 @@ __pycache__/
 # Never commit credentials in any form
 .env
 *.env
+/.claude/settings.local.json

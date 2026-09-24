@@ -65,6 +65,19 @@ The unit tests in `session.rs` check that an auth key never reaches the state fi
 - No per-chat filter or on/off switch yet. `listen` prints every update.
 - Nothing has run against a live account yet. The first `captain auth login` is the real test.
 
+## Build size
+
+`grammers-tl-types` compiles the whole TL schema, so one clean `make check` leaves about 1 GB
+in `target/`. Two things keep it from growing past that:
+
+- The dev profile in `Cargo.toml` builds dependencies without debuginfo and workspace crates
+  with line tables only. Before this, macOS kept one object file per codegen unit for every
+  rebuild, and a clean build was 1.35 GB instead of 0.99 GB.
+- `scripts/target-gc.sh` caps `target/` at 2 GB. `make check`, `make build`, and the Claude
+  Code Stop hook in `.claude/settings.json` all call it. Over the cap it deletes incremental
+  caches first, and runs `cargo clean` only if that is not enough. It does nothing while a
+  build is using the directory. Set `CAPTAIN_TARGET_CAP_MB` to change the cap.
+
 ## Dependency pins
 
 grammers is pinned to `=0.10.0` because pre-1.0 releases break between minors.
