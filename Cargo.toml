@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 captain-core = { path = "crates/captain-core" }
 captain-format = { path = "crates/captain-format" }
+captain-inbox = { path = "crates/captain-inbox" }
 captain-protocol = { path = "crates/captain-protocol" }
 captain-vault = { path = "crates/captain-vault" }
 
@@ -30,8 +31,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs"] }
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
 
 [workspace.lints.rust]
 missing_docs = "warn"
