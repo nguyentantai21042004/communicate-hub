@@ -139,6 +139,12 @@ pub async fn handle(app: &App, request: Request) -> Result<Value> {
         Request::Send { message } => app.send(message).await,
         Request::Download { chat, message, out } => app.download(chat, message, out).await,
         Request::Chats { limit } => app.chats(limit).await,
+        Request::History {
+            chat,
+            pattern,
+            before,
+            scan_max,
+        } => app.history(chat, &pattern, before, scan_max).await,
         Request::Tickets {
             state,
             trigger,

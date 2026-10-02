@@ -45,6 +45,17 @@ pub enum Request {
         /// How many.
         limit: usize,
     },
+    /// Search a chat's history on Telegram with a regex. Reads only; nothing is stored.
+    History {
+        /// Chat to read.
+        chat: ChatId,
+        /// Regular expression, matched case-insensitively against text and captions.
+        pattern: String,
+        /// Start below this message, to page further back; `None` starts at the newest.
+        before: Option<MessageId>,
+        /// How many messages to read at most.
+        scan_max: usize,
+    },
     /// List tickets.
     Tickets {
         /// Only this state, by name.

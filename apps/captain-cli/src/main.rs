@@ -53,6 +53,7 @@ const LOG_SUFFIX: &str = "log";
 const SECS_PER_DAY: i64 = 86_400;
 const DEFAULT_REPORT_DAYS: i64 = 14;
 const DEFAULT_CHATS: usize = 50;
+const DEFAULT_HISTORY_SCAN: usize = 3000; // 30 getHistory pages of 100
 const OPEN_COMMAND: &str = "open"; // macOS: opens a URL in the default browser
 
 #[derive(Parser)]
@@ -115,6 +116,22 @@ enum Command {
         /// How many.
         #[arg(long, default_value_t = DEFAULT_CHATS)]
         limit: usize,
+    },
+    /// Search a chat's older messages on Telegram with a regex. Needs the daemon. Matches
+    /// print oldest first with a t.me link; nothing is stored or marked read.
+    History {
+        /// Marked chat id, as printed by `chats`.
+        #[arg(long, allow_hyphen_values = true)]
+        chat: i64,
+        /// Regular expression for text and captions, case-insensitive. `(?-i)` turns that off.
+        #[arg(long)]
+        grep: String,
+        /// Start below this message id. Pass the last `oldest_scanned` to page further back.
+        #[arg(long)]
+        before: Option<i32>,
+        /// Messages to read, newest first, 100 per request.
+        #[arg(long, default_value_t = DEFAULT_HISTORY_SCAN)]
+        scan: usize,
     },
     /// List tickets, newest first.
     Tickets(TicketsArgs),
@@ -357,6 +374,23 @@ async fn main() -> Result<()> {
                 Err(e) => Err(e),
             };
             finish(conn, dialogs.map(|d| json!(d))).await
+        }
+        Command::History {
+            chat,
+            grep,
+            before,
+            scan,
+        } => {
+            let Some(mut daemon) = daemon(&paths).await? else {
+                bail!("history search needs the daemon; start it with `captain daemon`");
+            };
+            let request = Request::History {
+                chat: ChatId(chat),
+                pattern: grep,
+                before: before.map(MessageId),
+                scan_max: scan,
+            };
+            emit(&daemon.call(request).await?)
         }
         Command::Tickets(args) => {
             let request = Request::Tickets {

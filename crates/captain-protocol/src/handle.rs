@@ -71,6 +71,33 @@ impl Handle {
             .map(|m| inbound::message_view(&m, self.self_id)))
     }
 
+    /// Fetches up to `limit` messages older than `before`, or the newest ones when it is
+    /// `None`, newest first. Reading history does not mark anything as read.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::UnknownChat`] when the chat is not in the peer cache, and
+    /// [`crate::Error::Rpc`] when Telegram refuses `messages.getHistory`.
+    pub async fn history(
+        &self,
+        chat: ChatId,
+        before: Option<MessageId>,
+        limit: usize,
+    ) -> Result<Vec<MessageView>> {
+        let peer = self.outbound().resolve(&ChatRef::Id(chat)).await?;
+        // TELEGRAM: messages.getHistory leaves the read marker alone; only
+        // messages.readHistory and channels.readHistory move it, and neither is called here.
+        let mut iter = self.client.iter_messages(peer).limit(limit);
+        if let Some(id) = before {
+            iter = iter.offset_id(id.0);
+        }
+        let mut out = Vec::new();
+        while let Some(m) = iter.next().await.map_err(rpc("messages.getHistory"))? {
+            out.push(inbound::message_view(&m, self.self_id));
+        }
+        Ok(out)
+    }
+
     /// Downloads the media attached to a message, or `None` if it has none.
     ///
     /// # Errors

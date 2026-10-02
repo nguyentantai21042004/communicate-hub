@@ -94,6 +94,7 @@ const MESSAGE_COLUMNS: &str =
 
 impl Store {
     /// Records a chat or user the account has seen, with its scope entry when it has one.
+    /// Without an entry, as for a group message's sender, the stored scope fields are kept.
     ///
     /// # Errors
     ///
@@ -104,18 +105,20 @@ impl Store {
         entry: Option<&ChatEntry>,
         now: i64,
     ) -> Result<()> {
+        // A DM partner who also writes in a group is seen as a sender there, without an entry.
+        // Overwriting would erase the DM chat's label and profile.
         self.conn.execute(
             "INSERT INTO chats (chat_id, kind, title, username, scope_label, scope_kind, profile,
                                 first_seen, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-             ON CONFLICT (chat_id) DO UPDATE SET
-                 kind = excluded.kind,
-                 title = coalesce(excluded.title, title),
-                 username = coalesce(excluded.username, username),
-                 scope_label = excluded.scope_label,
-                 scope_kind = excluded.scope_kind,
-                 profile = excluded.profile,
-                 last_seen = excluded.last_seen",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                kind = excluded.kind,
+                title = coalesce(excluded.title, title),
+                username = coalesce(excluded.username, username),
+                 scope_label = CASE WHEN ?9 THEN excluded.scope_label ELSE scope_label END,
+                 scope_kind = CASE WHEN ?9 THEN excluded.scope_kind ELSE scope_kind END,
+                 profile = CASE WHEN ?9 THEN excluded.profile ELSE profile END,
+                last_seen = excluded.last_seen",
             params![
                 chat.id.0,
                 kind_str(chat.kind),
@@ -125,6 +128,7 @@ impl Store {
                 entry.map(|e| entry_kind_str(e.kind)),
                 entry.map(|e| e.profile.as_str()),
                 now,
+                entry.is_some(),
             ],
         )?;
         Ok(())
@@ -374,6 +378,35 @@ impl Store {
 pub(crate) mod tests {
     use super::*;
     use captain_core::FormattedText;
+
+    #[test]
+    fn seeing_a_dm_partner_as_a_sender_keeps_the_dm_scope() {
+        let store = Store::open_in_memory().unwrap();
+        let partner = chat(42, ChatKind::User);
+        let entry = ChatEntry {
+            id: partner.id,
+            label: "partner".into(),
+            kind: EntryKind::Dm,
+            topics: None,
+            triggers: Vec::new(),
+            keywords: Vec::new(),
+            profile: "dm".into(),
+            mute_until_unix: None,
+        };
+        store.upsert_chat(&partner, Some(&entry), 10).unwrap();
+        store.upsert_chat(&partner, None, 20).unwrap();
+        let (label, profile, last_seen): (Option<String>, Option<String>, i64) = store
+            .conn
+            .query_row(
+                "SELECT scope_label, profile, last_seen FROM chats WHERE chat_id = 42",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(label.as_deref(), Some("partner"));
+        assert_eq!(profile.as_deref(), Some("dm"));
+        assert_eq!(last_seen, 20);
+    }
 
     pub(crate) fn chat(id: i64, kind: ChatKind) -> ChatSummary {
         ChatSummary {

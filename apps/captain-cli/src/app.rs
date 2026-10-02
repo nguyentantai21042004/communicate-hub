@@ -16,6 +16,8 @@ use crate::paths::Paths;
 use crate::pipeline::PipelineInput;
 
 const SECS_PER_DAY: i64 = 86_400;
+const HISTORY_SCAN_CAP: usize = 20_000; // 200 getHistory pages; keeps one search from hammering the API
+const PRIVATE_POST_URL: &str = "https://t.me/c"; // opens a channel message for its members
 
 pub fn now_unix() -> i64 {
     SystemTime::now()
@@ -264,6 +266,38 @@ impl App {
         Ok(json!(dialogs))
     }
 
+    /// Reads up to `scan_max` messages of `chat` older than `before` from Telegram and returns
+    /// those whose text matches `pattern`, oldest first. Nothing is stored or marked read.
+    pub async fn history(
+        &self,
+        chat: captain_core::ChatId,
+        pattern: &str,
+        before: Option<captain_core::MessageId>,
+        scan_max: usize,
+    ) -> Result<Value> {
+        let regex = regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("invalid pattern {pattern:?}"))?;
+        let scan_max = scan_max.clamp(1, HISTORY_SCAN_CAP);
+        let messages = self.live()?.handle.history(chat, before, scan_max).await?;
+        let scanned = messages.len();
+        let matches = history_matches(chat, &messages, &regex);
+        tracing::info!(
+            chat = chat.0,
+            scanned,
+            matches = matches.len(),
+            "history searched"
+        );
+        Ok(json!({
+            "chat": chat,
+            "scanned": scanned,
+            "oldest_scanned": messages.last().map(|m| m.id),
+            "more_before": scanned == scan_max,
+            "matches": matches,
+        }))
+    }
+
     pub async fn send(&self, message: captain_core::OutgoingMessage) -> Result<Value> {
         let sent = self.live()?.handle.send(message).await?;
         Ok(json!({ "sent": sent }))
@@ -304,5 +338,82 @@ impl App {
             .await
             .map_err(|_| anyhow!("the pipeline has stopped"))??;
         Ok(json!({ "ticket": id }))
+    }
+}
+
+/// The messages, given newest first, whose text matches `regex`, oldest first.
+fn history_matches(
+    chat: captain_core::ChatId,
+    messages: &[captain_core::MessageView],
+    regex: &regex::Regex,
+) -> Vec<Value> {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| regex.is_match(&m.text.text))
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "date_unix": m.date_unix,
+                "sender": m.sender.as_ref().and_then(|s| s.name.clone()),
+                "text": m.text.text,
+                "link": chat
+                    .channel_id()
+                    .map(|c| format!("{PRIVATE_POST_URL}/{c}/{}", m.id.0)),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use captain_core::{ChatId, ChatKind, FormattedText, MessageId, MessageView};
+
+    fn message(chat: i64, id: i32, text: &str) -> MessageView {
+        let summary = |id: i64, kind| ChatSummary {
+            id: ChatId(id),
+            kind,
+            name: Some(format!("chat {id}")),
+            username: None,
+            is_bot: false,
+        };
+        MessageView {
+            chat: summary(chat, ChatKind::Channel),
+            id: MessageId(id),
+            sender: Some(summary(7, ChatKind::User)),
+            outgoing: false,
+            date_unix: i64::from(id),
+            text: FormattedText::plain(text),
+            media: None,
+            reply_to: None,
+            album_id: None,
+            mentioned: false,
+            topic: None,
+            quote_text: None,
+            forward: None,
+            edited_at_unix: None,
+        }
+    }
+
+    #[test]
+    fn history_matches_ignore_case_and_come_oldest_first() {
+        let chat = -1_004_357_342_519;
+        let newest_first = [
+            message(chat, 3, "GIỚI THIỆU lại Fleet"),
+            message(chat, 2, "không liên quan"),
+            message(chat, 1, "Mình giới thiệu Fleet nhé"),
+        ];
+        let regex = regex::RegexBuilder::new("giới thiệu.*fleet")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let found = history_matches(ChatId(chat), &newest_first, &regex);
+        let ids: Vec<i64> = found.iter().map(|m| m["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(found[0]["link"], "https://t.me/c/4357342519/1");
+
+        let group = history_matches(ChatId(-5_110_213_073), &newest_first[2..], &regex);
+        assert!(group[0]["link"].is_null());
     }
 }

@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use captain_core::{ChatId, MessageId};
+use captain_core::{ChatId, ChatKind, MessageId};
+use captain_inbox::config::{DM_PROFILE, GROUP_PROFILE};
 use captain_inbox::report::{
     Answered, ApiEvent, ApiTrouble, Candidate, ContextShape, InboundCount, ReportInput, RunSpan,
     TicketFact,
@@ -10,7 +11,8 @@ use captain_inbox::report::{
 use captain_inbox::unix_day;
 use rusqlite::params;
 
-use crate::{Result, Store, TicketFilter};
+use crate::messages::kind_str;
+use crate::{MetricKind, Result, Store, TicketFilter};
 
 const BURST_GAP_MAX_SECS: i64 = 300; // M7 counts gaps up to five minutes
 const PROXIMITY_REPLY_SECS: i64 = 1800; // M6: an unthreaded reply answers the last message within 30 min
@@ -108,17 +110,28 @@ impl Store {
     }
 
     fn burst_gaps(&self, since: i64, until: i64) -> Result<Vec<(String, i64)>> {
+        // Chats stored before the sender fix in upsert_chat lost their profile, so fall back to
+        // the default profile for the chat kind.
         let mut stmt = self.conn.prepare(
-            "SELECT coalesce(c.profile, 'group'), gap FROM (
-                 SELECT chat_id, date - lag(date) OVER (
-                     PARTITION BY chat_id, topic_id ORDER BY date, msg_id) AS gap
-                 FROM messages WHERE outgoing = 0 AND date >= ?1 AND date < ?2
+            "SELECT coalesce(c.profile, CASE g.kind WHEN ?4 THEN ?5 ELSE ?6 END), gap FROM (
+                 SELECT m.chat_id, k.kind, m.date - lag(m.date) OVER (
+                     PARTITION BY m.chat_id, m.topic_id ORDER BY m.date, m.msg_id) AS gap
+                 FROM messages m LEFT JOIN chats k ON k.chat_id = m.chat_id
+                 WHERE m.outgoing = 0 AND m.date >= ?1 AND m.date < ?2
              ) g LEFT JOIN chats c ON c.chat_id = g.chat_id
              WHERE gap IS NOT NULL AND gap <= ?3",
         )?;
-        let rows = stmt.query_map(params![since, until, BURST_GAP_MAX_SECS], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                since,
+                until,
+                BURST_GAP_MAX_SECS,
+                kind_str(ChatKind::User),
+                DM_PROFILE,
+                GROUP_PROFILE
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -181,13 +194,17 @@ impl Store {
 
     fn runs(&self, since: i64, until: i64) -> Result<Vec<RunSpan>> {
         let mut stmt = self.conn.prepare(
-            "SELECT started_at, stopped_at FROM daemon_runs
-             WHERE stopped_at >= ?1 AND started_at < ?2 ORDER BY started_at",
+            "SELECT r.started_at, r.stopped_at, EXISTS (
+                 SELECT 1 FROM metric_events e
+                 WHERE e.kind = ?3 AND e.at BETWEEN r.started_at AND r.stopped_at)
+             FROM daemon_runs r
+             WHERE r.stopped_at >= ?1 AND r.started_at < ?2 ORDER BY r.started_at",
         )?;
-        let rows = stmt.query_map(params![since, until], |r| {
+        let rows = stmt.query_map(params![since, until, MetricKind::CatchUp.as_str()], |r| {
             Ok(RunSpan {
                 started_at: r.get(0)?,
                 stopped_at: r.get(1)?,
+                caught_up: r.get(2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -305,5 +322,31 @@ mod tests {
         assert_eq!(input.api.len(), 1);
         let built = report::build(&input, &Policy::default());
         assert_eq!(built.sections.len(), 7);
+    }
+
+    #[test]
+    fn burst_gaps_and_catch_up_use_what_was_stored() {
+        let store = Store::open_in_memory().unwrap();
+        let dm = 5;
+        // A DM chat whose profile was lost, as rows written before the upsert_chat fix are.
+        store
+            .upsert_chat(&chat(dm, ChatKind::User), None, 0)
+            .unwrap();
+        for (id, date) in [(1, 100), (2, 110)] {
+            let mut m = msg(dm, id, date, false);
+            m.chat = chat(dm, ChatKind::User);
+            store.put_message(&m, date, true).unwrap();
+        }
+        let first = store.start_run(0).unwrap();
+        store.heartbeat(first, 50).unwrap();
+        store.start_run(60).unwrap();
+        store
+            .record(&MetricEvent::new(MetricKind::CatchUp, 60))
+            .unwrap();
+
+        let input = store.report_input(0, 200).unwrap();
+        assert_eq!(input.burst_gaps, [("dm".to_owned(), 10)]);
+        let caught_up: Vec<bool> = input.runs.iter().map(|r| r.caught_up).collect();
+        assert_eq!(caught_up, [false, true]);
     }
 }

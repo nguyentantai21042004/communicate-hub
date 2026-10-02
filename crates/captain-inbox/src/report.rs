@@ -111,6 +111,9 @@ pub struct RunSpan {
     pub started_at: i64,
     /// Last heartbeat or stop time.
     pub stopped_at: i64,
+    /// Whether the run asked Telegram for what it missed while offline. The gap before a run
+    /// that did is filled; the gap before one that did not counts in M15.
+    pub caught_up: bool,
 }
 
 /// Kinds of API trouble counted in M17.
@@ -311,7 +314,7 @@ pub struct Report {
     reason = "counts and seconds stay far below 2^52"
 )]
 pub fn build(input: &ReportInput, policy: &Policy) -> Report {
-    let days = ((input.until - input.since) as f64 / SECS_PER_DAY as f64).max(1.0 / 24.0);
+    let days = ((input.until - watched_from(input)) as f64 / SECS_PER_DAY as f64).max(1.0 / 24.0);
     let per_day = |n: usize| Some(n as f64 / days);
     let mut ctx = Ctx {
         input,
@@ -372,6 +375,14 @@ struct Ctx<'a> {
     policy: &'a Policy,
     days: f64,
     rules: Vec<Rule>,
+}
+
+/// Start of the part of the window the daemon watched. Days before the first run hold no
+/// data, so rates and uptime must not count them.
+fn watched_from(input: &ReportInput) -> i64 {
+    input
+        .first_run_at
+        .map_or(input.since, |first| first.clamp(input.since, input.until))
 }
 
 fn stat(label: impl Into<String>, value: Option<f64>, unit: Unit) -> Stat {
@@ -854,14 +865,21 @@ impl<'a> Ctx<'a> {
         self.latency("M13", "Time to reply", |t| t.reply_secs)
     }
 
-    fn up_spans(&self) -> Vec<(i64, i64)> {
+    /// Runs clipped to the window, sorted by start, with whether each one caught up.
+    fn up_spans(&self) -> Vec<(i64, i64, bool)> {
         let (since, until) = (self.input.since, self.input.until);
-        let mut spans: Vec<(i64, i64)> = self
+        let mut spans: Vec<(i64, i64, bool)> = self
             .input
             .runs
             .iter()
-            .map(|r| (r.started_at.max(since), r.stopped_at.min(until)))
-            .filter(|(a, b)| b > a)
+            .map(|r| {
+                (
+                    r.started_at.max(since),
+                    r.stopped_at.min(until),
+                    r.caught_up,
+                )
+            })
+            .filter(|(a, b, _)| b > a)
             .collect();
         spans.sort_unstable();
         spans
@@ -870,13 +888,10 @@ impl<'a> Ctx<'a> {
     #[expect(clippy::cast_precision_loss, reason = "seconds stay far below 2^52")]
     fn m14(&mut self) -> Metric {
         let spans = self.up_spans();
-        let watched_from = self
-            .input
-            .first_run_at
-            .map_or(self.input.since, |first| first.max(self.input.since));
+        let watched_from = watched_from(self.input);
         let mut covered = 0;
         let mut cursor = watched_from;
-        for (a, b) in &spans {
+        for (a, b, _) in &spans {
             let start = (*a).max(cursor);
             if *b > start {
                 covered += b - start;
@@ -894,7 +909,7 @@ impl<'a> Ctx<'a> {
         self.rule(
             "uptime_low",
             state,
-            "uptime under 97 %, or any coverage gap",
+            "uptime under 97 %, or any gap catch-up did not fill",
             "Check the daemon host before P2: power settings, sleep, crashes in the log.".into(),
         );
         Metric {
@@ -906,10 +921,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Offline stretches between runs that catch-up did not fill.
     fn gaps(&self) -> Vec<i64> {
         let spans = self.up_spans();
         spans
             .windows(2)
+            .filter(|w| !w[1].2)
             .map(|w| w[1].0 - w[0].1)
             .filter(|g| *g > 0)
             .collect()
@@ -1088,7 +1105,7 @@ fn top_candidates(candidates: &[Candidate]) -> Vec<Candidate> {
 }
 
 fn daily(input: &ReportInput) -> Vec<DailyTickets> {
-    let first = unix_day(input.since);
+    let first = unix_day(watched_from(input));
     let last = unix_day(input.until.max(input.since));
     let mut days: BTreeMap<i64, DailyTickets> = (first..=last)
         .map(|day| {
@@ -1245,14 +1262,17 @@ mod tests {
             RunSpan {
                 started_at: 0,
                 stopped_at: 50,
+                caught_up: true,
             },
             RunSpan {
                 started_at: 40,
                 stopped_at: 60,
+                caught_up: false,
             },
             RunSpan {
                 started_at: 80,
                 stopped_at: 100,
+                caught_up: false,
             },
         ];
         let r = build(
@@ -1270,6 +1290,61 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_filled_by_catch_up_is_not_a_coverage_gap() {
+        let runs = vec![
+            RunSpan {
+                started_at: 0,
+                stopped_at: 99,
+                caught_up: true,
+            },
+            RunSpan {
+                started_at: 100,
+                stopped_at: 10_000,
+                caught_up: true,
+            },
+        ];
+        let r = build(
+            &ReportInput {
+                since: 0,
+                until: 10_000,
+                runs,
+                ..ReportInput::default()
+            },
+            &Policy::default(),
+        );
+        assert_eq!(metric(&r, "M15").summary[0].value, Some(0.0));
+        assert_eq!(rule(&r, "uptime_low")[0].state, RuleState::Holds);
+    }
+
+    #[test]
+    fn rates_count_only_the_days_since_the_first_run() {
+        let first = 10 * DAY;
+        let tickets = (0..8)
+            .map(|i| {
+                ticket(
+                    i,
+                    TriggerKind::Mention,
+                    first + i * 100,
+                    ImplicitLabel::Answered,
+                )
+            })
+            .collect();
+        let r = build(
+            &ReportInput {
+                since: 0,
+                until: 14 * DAY,
+                tickets,
+                first_run_at: Some(first),
+                ..ReportInput::default()
+            },
+            &Policy::default(),
+        );
+        assert_eq!(r.days, 4.0);
+        assert_eq!(metric(&r, "M2").summary[0].value, Some(2.0));
+        assert_eq!(r.daily.len(), 5);
+    }
+
+    #[test]
     fn uptime_ignores_the_time_before_the_first_run() {
         let r = build(
             &ReportInput {
@@ -1278,6 +1353,7 @@ mod tests {
                 runs: vec![RunSpan {
                     started_at: 60,
                     stopped_at: 100,
+                    caught_up: true,
                 }],
                 first_run_at: Some(60),
                 ..ReportInput::default()

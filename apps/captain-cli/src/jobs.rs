@@ -103,6 +103,9 @@ async fn record_catch_up(app: &App, run_id: i64) -> Result<()> {
     app.db
         .run(move |s| {
             let offline = s.previous_run_end(run_id)?.map(|end| started - end);
+            // FIXME(tantai): always tagged ok. grammers handles differenceTooLong inside its
+            // message box and only logs it at debug, so a truncated catch-up still counts as
+            // filling the gap in M15. Lost messages then show up only as missed recall (M6).
             s.record(&MetricEvent {
                 a: Some(delivered),
                 b: offline,
