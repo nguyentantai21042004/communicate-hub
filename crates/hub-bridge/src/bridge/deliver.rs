@@ -4,10 +4,12 @@
 //! stale mapping is dropped before a replacement is opened, and that replacement happens at most
 //! [`TOPIC_RECREATE_LIMIT`] times. A delivery error is stored and the lane moves on.
 
+use std::collections::HashMap;
+
 use hub_core::{
-    Attachment, AttachmentKind, AttachmentSource, ConversationId, ConversationKind, Mention,
-    MessageRef, OutgoingMessage, RemoteEdit, RemoteEvent, RemoteMessage, SessionState, TgMessageId,
-    TopicId,
+    Attachment, AttachmentKind, AttachmentSource, ConversationId, ConversationKind, DirectoryTitle,
+    Mention, MessageRef, OutgoingMessage, RemoteEdit, RemoteEvent, RemoteMessage, SessionState,
+    TgMessageId, TopicId,
 };
 
 use crate::error::Result;
@@ -24,6 +26,11 @@ use crate::store::TopicMapping;
 use super::{Inner, Plan, SinkOp, SinkOut, Step, cache_insert, lock, topic_of};
 
 type CoreError = hub_core::Error;
+
+fn is_placeholder(title: &str, external_id: &str) -> bool {
+    let title = title.trim();
+    title.is_empty() || title == external_id
+}
 
 impl<S, St, C> Inner<S, St, C>
 where
@@ -75,6 +82,7 @@ where
                     .await
             }
             RemoteEvent::SessionChanged { state } => self.on_session(state).await,
+            RemoteEvent::DirectorySnapshot { entries } => self.on_directory(entries).await,
         }
     }
 
@@ -241,6 +249,99 @@ where
                 Ok(())
             }
         }
+    }
+
+    async fn on_directory(&self, entries: Vec<DirectoryTitle>) -> Result<()> {
+        let _pass = self.backfill.lock().await;
+        let mut names = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            let title = entry.title.trim();
+            if title.is_empty() || title == entry.conversation.external_id {
+                continue;
+            }
+            names.insert(entry.conversation, title.to_owned());
+        }
+        let stored = self.store.load_topics().await?;
+        let mut pending = Vec::new();
+        for mapping in stored {
+            let Some(name) = names.get(&mapping.conversation) else {
+                continue;
+            };
+            let current = lock(&self.cache)
+                .titles
+                .get(&mapping.conversation)
+                .cloned()
+                .unwrap_or(mapping.title);
+            if !is_placeholder(&current, &mapping.conversation.external_id) {
+                continue;
+            }
+            pending.push((mapping.topic, mapping.conversation, name.clone()));
+        }
+        pending.sort_by_key(|(topic, _, _)| topic.0);
+        let waiting = pending.len();
+        let cap = self.config.backfill_rename_cap;
+        let mut started = 0usize;
+        for (_topic, conversation, name) in pending {
+            if started >= cap {
+                break;
+            }
+            // Seed `applied` from the stored id before the write. A cold cache would
+            // otherwise treat the name we are about to store as the last title set.
+            if self.topic_id(&conversation).await?.is_none() {
+                continue;
+            }
+            if !self.backfill_should_rename(&conversation, &name) {
+                continue;
+            }
+            if started > 0 && !self.backfill_gap().await {
+                break;
+            }
+            self.store.set_title(&conversation, &name).await?;
+            lock(&self.cache).titles.insert(conversation.clone(), name);
+            self.rename_if_needed(&conversation).await?;
+            started += 1;
+        }
+        tracing::info!(renames = started, waiting, "directory backfill");
+        Ok(())
+    }
+
+    async fn backfill_gap(&self) -> bool {
+        let gap = self.config.backfill_rename_gap_secs;
+        if gap <= 0 {
+            return !*self.stop.borrow();
+        }
+        let deadline = self.clock.unix_secs().saturating_add(gap);
+        let sleep = self.clock.sleep_until(deadline);
+        tokio::pin!(sleep);
+        let mut stop = self.stop.subscribe();
+        if *stop.borrow() {
+            return false;
+        }
+        tokio::select! {
+            biased;
+            changed = stop.changed() => changed.is_ok() && !*stop.borrow(),
+            () = &mut sleep => !*self.stop.borrow(),
+        }
+    }
+
+    fn backfill_should_rename(&self, conversation: &ConversationId, name: &str) -> bool {
+        let cache = lock(&self.cache);
+        let applied = cache
+            .applied
+            .get(conversation)
+            .map(String::as_str)
+            .unwrap_or("");
+        let rendered = topic_title(conversation.network, conversation.kind, name);
+        let previous = topic_title(conversation.network, conversation.kind, applied);
+        if rendered == previous {
+            return false;
+        }
+        if let Some(at) = cache.renamed_at.get(conversation).copied()
+            && self.clock.unix_secs().saturating_sub(at) < RENAME_INTERVAL_SECS
+        {
+            return false;
+        }
+        true
     }
 
     async fn on_chat_info(

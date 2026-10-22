@@ -121,6 +121,7 @@ pub(crate) struct Inner<S, St, C> {
     open_failures: AtomicU64,
     life: AtomicU8,
     stop: watch::Sender<bool>,
+    backfill: tokio::sync::Mutex<()>,
 }
 
 /// Routes [`RemoteEvent`]s into forum topics and topic replies back to the source network.
@@ -171,6 +172,7 @@ where
                 open_failures: AtomicU64::new(0),
                 life: AtomicU8::new(LIFE_IDLE),
                 stop,
+                backfill: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -575,7 +577,7 @@ fn lane_of_remote(event: &RemoteEvent) -> Option<String> {
         RemoteEvent::ChatInfo { conversation, .. }
         | RemoteEvent::GroupEvent { conversation, .. } => Some(conversation.to_string()),
         RemoteEvent::FriendRequest { .. } => Some(OPS_LANE.to_owned()),
-        RemoteEvent::SessionChanged { .. } => None,
+        RemoteEvent::SessionChanged { .. } | RemoteEvent::DirectorySnapshot { .. } => None,
     }
 }
 

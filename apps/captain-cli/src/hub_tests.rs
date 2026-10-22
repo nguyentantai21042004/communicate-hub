@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use captain_vault::{MemoryStore, Profile, Secret};
 use hub_analytics::health;
-use hub_core::{ConversationId, ModuleState};
+use hub_core::{ConversationId, ConversationKind, ModuleState, Network};
 use hub_store::SharedHub;
 use hub_web::HubApi;
 use hub_zalo::RunPhase;
@@ -29,9 +29,12 @@ const WAIT: Duration = Duration::from_secs(15);
 const LOCK_RETRY_ATTEMPTS: u32 = 50; // 50 x 20 ms covers a sidecar spawn between fork and exec
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 
+#[derive(Clone, Debug)]
 struct Hit {
     method: String,
     status: u16,
+    at: Instant,
+    name: String,
 }
 
 struct BotState {
@@ -42,6 +45,7 @@ struct BotState {
     next_message: i32,
     topic: i32,
     rate_left: u32,
+    edit_rate_left: u32,
 }
 
 struct BotFake {
@@ -64,6 +68,7 @@ impl BotFake {
             next_message: 50,
             topic: 0,
             rate_left: 0,
+            edit_rate_left: 0,
         }));
         let wake = Arc::new(Notify::new());
         let shared = Arc::clone(&state);
@@ -115,6 +120,29 @@ impl BotFake {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .rate_left = 1;
+    }
+
+    fn arm_edit_rate_limit(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .edit_rate_left = 1;
+    }
+
+    async fn edits(&self) -> Vec<Hit> {
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_blocking(move || {
+            state
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .hits
+                .iter()
+                .filter(|hit| hit.method == "editForumTopic")
+                .cloned()
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     async fn push_text(&self, thread: i32, text: &str) {
@@ -176,10 +204,16 @@ async fn serve(
         };
         ready.await;
     }
+    let name = request_name(&method, &body);
     let (status, response) = reply(&method, &state);
     {
         let mut state = state.lock().unwrap_or_else(|err| err.into_inner());
-        state.hits.push(Hit { method, status });
+        state.hits.push(Hit {
+            method,
+            status,
+            at: Instant::now(),
+            name,
+        });
     }
     let payload = response.into_bytes();
     let header = format!(
@@ -212,6 +246,14 @@ fn reply(method: &str, state: &Mutex<BotState>) -> (u16, String) {
                 format!(
                     r#"{{"ok":true,"result":{{"message_thread_id":{topic},"name":"room-1","icon_color":7322096}}}}"#
                 ),
+            )
+        }
+        "editForumTopic" if state.edit_rate_left > 0 => {
+            state.edit_rate_left -= 1;
+            (
+                429,
+                r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":1}}"#
+                    .to_owned(),
             )
         }
         "sendMessage" if state.rate_left > 0 => {
@@ -269,6 +311,16 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Option<(String,
     }
 }
 
+fn request_name(method: &str, body: &[u8]) -> String {
+    if method != "editForumTopic" {
+        return String::new();
+    }
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("name").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default()
+}
+
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -317,6 +369,46 @@ fn write_hub_toml(dir: &Path) {
         script.display().to_string()
     );
     std::fs::write(dir.join("hub.toml"), body).unwrap();
+}
+
+fn write_backfill_toml(dir: &Path) {
+    let script = fixture();
+    let body = format!(
+        "group_id = {GROUP}\nadmin_user_ids = [7]\nsidecar_program = \"node\"\nsidecar_args = [{:?}]\navatar_card = false\nbackfill_rename_cap = 2\nbackfill_rename_gap_secs = 2\n",
+        script.display().to_string()
+    );
+    std::fs::write(dir.join("hub.toml"), body).unwrap();
+}
+
+fn seed_numeric_topics(dir: &Path) {
+    let hub = SharedHub::open(&dir.join("inbox.sqlite")).unwrap();
+    let mut guard = hub.lock();
+    for (external_id, topic) in [
+        ("1001", 3703),
+        ("1002", 3705),
+        ("1003", 3707),
+        ("1004", 3713),
+        ("1005", 3718),
+    ] {
+        guard
+            .upsert_topic_row(&group_id(external_id), topic, external_id, 1)
+            .unwrap();
+    }
+}
+
+fn group_id(external_id: &str) -> ConversationId {
+    ConversationId {
+        network: Network::Zalo,
+        kind: ConversationKind::Group,
+        external_id: external_id.to_owned(),
+    }
+}
+
+fn stored_title(hub: &SharedHub, external_id: &str) -> String {
+    hub.lock()
+        .conversation_title(&group_id(external_id))
+        .unwrap()
+        .unwrap_or_default()
 }
 
 async fn wait_running(hub: &RunningHub) {
@@ -498,6 +590,113 @@ async fn round_trip_restart_crash_and_rate_limit_stay_offline() {
     let status = std::fs::read_to_string(dir.join("hub.toml")).unwrap_or_default();
     assert!(!status.contains(TOKEN));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn directory_backfill_renames_four_of_five_and_carries_the_cap() {
+    if !node_ok() {
+        return;
+    }
+    const PHASE: Duration = Duration::from_secs(30);
+    let dir = temp_state("backfill");
+    write_backfill_toml(&dir);
+    seed_numeric_topics(&dir);
+    let fake = BotFake::start().await;
+    let options = || {
+        run_options(
+            dir.clone(),
+            Secret::new(TOKEN),
+            fake.base.clone(),
+            Some(Duration::from_millis(200)),
+        )
+    };
+
+    let running = start_hub(options()).await.unwrap();
+    wait_running(&running).await;
+    emit_directory(&running).await;
+    wait_count_for(&fake, "editForumTopic", 200, 1, PHASE).await;
+    fake.arm_edit_rate_limit();
+    wait_count_for(&fake, "editForumTopic", 429, 1, PHASE).await;
+    wait_count_for(&fake, "editForumTopic", 200, 2, PHASE).await;
+    let first = fake.edits().await;
+    assert_eq!(first.len(), 3, "{first:?}");
+    assert_eq!(first[0].status, 200);
+    assert!(first[0].name.contains("An"), "{}", first[0].name);
+    assert_eq!(first[1].status, 429);
+    assert!(first[1].name.contains("Binh"), "{}", first[1].name);
+    assert!(first[2].name.contains("Binh"), "{}", first[2].name);
+    assert!(first[1].at.saturating_duration_since(first[0].at) >= Duration::from_secs(1));
+    assert_eq!(stored_title(running.hub(), "1001"), "An");
+    assert_eq!(stored_title(running.hub(), "1002"), "Binh");
+    assert_eq!(stored_title(running.hub(), "1003"), "1003");
+    assert_eq!(stored_title(running.hub(), "1004"), "1004");
+    assert_eq!(stored_title(running.hub(), "1005"), "1005");
+    assert_eq!(fake.count("createForumTopic", 200).await, 0);
+    running.shutdown().await.unwrap();
+
+    let running = start_hub(options()).await.unwrap();
+    wait_running(&running).await;
+    emit_directory(&running).await;
+    wait_count_for(&fake, "editForumTopic", 200, 4, PHASE).await;
+    let second = fake.edits().await;
+    assert_eq!(second.len(), 5, "{second:?}");
+    assert!(second[3].name.contains("Chi"), "{}", second[3].name);
+    assert!(second[4].name.contains("Dung"), "{}", second[4].name);
+    assert!(second[4].at.saturating_duration_since(second[3].at) >= Duration::from_secs(1));
+    assert_eq!(stored_title(running.hub(), "1003"), "Chi");
+    assert_eq!(stored_title(running.hub(), "1004"), "Dung");
+    assert_eq!(stored_title(running.hub(), "1005"), "1005");
+    assert_eq!(fake.count("editForumTopic", 429).await, 1);
+    running.shutdown().await.unwrap();
+
+    let running = start_hub(options()).await.unwrap();
+    wait_running(&running).await;
+    emit_directory(&running).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(fake.count("editForumTopic", 200).await, 4);
+    assert_eq!(fake.count("editForumTopic", 429).await, 1);
+    assert_eq!(fake.count("createForumTopic", 200).await, 0);
+    assert_eq!(stored_title(running.hub(), "1001"), "An");
+    assert_eq!(stored_title(running.hub(), "1005"), "1005");
+    assert!(
+        fake.edits()
+            .await
+            .iter()
+            .all(|hit| !hit.name.contains("1005"))
+    );
+    running.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn wait_count_for(fake: &BotFake, method: &str, status: u16, n: usize, limit: Duration) {
+    let started = Instant::now();
+    while fake.count(method, status).await < n {
+        assert!(
+            started.elapsed() < limit,
+            "timed out waiting for {method} status {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn emit_directory(hub: &RunningHub) {
+    hub.sidecar()
+        .call(
+            "test.emit",
+            json!({
+                "event": "directory",
+                "data": {
+                    "entries": [
+                        {"kind": "group", "id": "1001", "name": "An"},
+                        {"kind": "group", "id": "1002", "name": "Binh"},
+                        {"kind": "group", "id": "1003", "name": "Chi"},
+                        {"kind": "group", "id": "1004", "name": "Dung"}
+                    ]
+                }
+            }),
+        )
+        .await
+        .unwrap();
 }
 
 #[test]

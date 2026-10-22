@@ -229,6 +229,8 @@ pub async fn start_hub(options: RunOptions) -> Result<RunningHub> {
         BridgeConfig {
             ops_topic: config.ops_topic_id.map(TopicId),
             avatar_card: config.avatar_card,
+            backfill_rename_cap: config.backfill_rename_cap,
+            backfill_rename_gap_secs: config.backfill_rename_gap_secs,
         },
         vec![Box::new(gate)],
         bot.clone(),
@@ -1068,7 +1070,9 @@ fn conversation_of(event: &RemoteEvent) -> Option<ConversationId> {
         }
         RemoteEvent::ChatInfo { conversation, .. }
         | RemoteEvent::GroupEvent { conversation, .. } => Some(conversation.clone()),
-        RemoteEvent::FriendRequest { .. } | RemoteEvent::SessionChanged { .. } => None,
+        RemoteEvent::FriendRequest { .. }
+        | RemoteEvent::SessionChanged { .. }
+        | RemoteEvent::DirectorySnapshot { .. } => None,
     }
 }
 

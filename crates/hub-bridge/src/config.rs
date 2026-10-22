@@ -2,6 +2,8 @@
 
 use hub_core::TopicId;
 
+use crate::limits::{BACKFILL_RENAME_CAP, BACKFILL_RENAME_GAP_SECS};
+
 /// Static options for one bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeConfig {
@@ -13,6 +15,10 @@ pub struct BridgeConfig {
     ///
     /// `false` skips that photo. The default is `true`.
     pub avatar_card: bool,
+    /// Renames one directory pass will enqueue. Further placeholder titles wait for the next pass.
+    pub backfill_rename_cap: usize,
+    /// Seconds to wait between those renames. The wait is dropped when the pass ends.
+    pub backfill_rename_gap_secs: i64,
 }
 
 impl Default for BridgeConfig {
@@ -20,6 +26,8 @@ impl Default for BridgeConfig {
         Self {
             ops_topic: None,
             avatar_card: true,
+            backfill_rename_cap: BACKFILL_RENAME_CAP,
+            backfill_rename_gap_secs: BACKFILL_RENAME_GAP_SECS,
         }
     }
 }

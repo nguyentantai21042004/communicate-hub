@@ -18,7 +18,8 @@ pub mod sink;
 pub use adapter::NetworkAdapter;
 pub use error::{Error, Result};
 pub use event::{
-    Attachment, AttachmentKind, AttachmentSource, Mention, RemoteEdit, RemoteEvent, RemoteMessage,
+    Attachment, AttachmentKind, AttachmentSource, DirectoryTitle, Mention, RemoteEdit, RemoteEvent,
+    RemoteMessage,
 };
 pub use health::{ModuleHealth, ModuleState, SessionState};
 pub use ids::{ConversationId, ConversationKind, MessageRef, Network, TgMessageId, TopicId};

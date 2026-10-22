@@ -53,7 +53,7 @@ Frames stay at or under 8 MiB. A longer line is discarded through the next newli
 <!-- contract:events -->
 
 ```json
-["message","reaction","undo","group_event","friend_request","session","listener","login.qr.state"]
+["message","reaction","undo","group_event","friend_request","session","directory","listener","login.qr.state"]
 ```
 
 ## Error codes
@@ -85,6 +85,8 @@ Frames stay at or under 8 MiB. A longer line is discarded through the next newli
 `directory.friends` takes `{}` and returns `friends`, a list of `{id, name, avatar_url?}`. A local alias wins over the Zalo display name. `avatar_url` is the friend's `avatar`, or `bgavatar` when that is the one Zalo sent. The listener fetches this list once at start and then at most once per 24 hours, plus one extra fetch when an event names an unknown id. There is no timer. A `rate_limited` error backs off and does not retry in a loop.
 
 `directory.groups` takes `{}` and returns `groups`, a list of `{id, name, avatar_url?}`. `avatar_url` is `avt` or `fullAvt`. It is fetched in the same pass as friends, after friends, so a rate limit on friends does not also call groups.
+
+`directory` is an event, not a method. Each successful friends and groups fetch emits `{entries: [{kind, id, name}]}` with the lists that fetch already returned. `kind` is `dm` or `group`. Empty names and names equal to the id are omitted. A failed fetch emits nothing. There is no timer.
 
 `directory.group_members` takes `group_id` and returns `members`, a list of `{id, name}`. Names are cached for 5 minutes, and the cache keeps at most 64 groups. A message loads the list only when the sender or a mention has no display name. The cache prefers `currentMems` on the group info. Missing names are filled from the PC app profile API when `app-session.json` sits next to the credentials file and is mode `0600`. Otherwise the web `getGroupInfo` and `getUserInfo` calls are the fallback. The PC app login flow that creates `app-session.json` is not a method here.
 
@@ -133,6 +135,8 @@ A bank card's text is the bank name, the account number, and the holder, one per
 `friend_request` data is `sender_id`, `sender_display_name`, and `message`. `message` is empty when the request had no greeting. The sidecar emits this only for a request someone else sent.
 
 `session` data is `state` and optional `detail`. `state` is `valid`, `expired`, `disconnected`, or `reconnecting`. `detail` is a short token such as `not_logged_in` or `close_1006`, never message text.
+
+`directory` data is `entries`, a list of `{kind, id, name}`. `kind` is `dm` or `group`. The sidecar emits it after each successful friends and groups fetch. Empty names and names equal to the id are left out. A failed fetch emits nothing.
 
 `listener` data is `state` `up` or `down`, and `reason`, a short token.
 

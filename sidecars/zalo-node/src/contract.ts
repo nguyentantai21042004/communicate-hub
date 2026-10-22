@@ -28,6 +28,7 @@ export const EVENT_NAMES = [
   "group_event",
   "friend_request",
   "session",
+  "directory",
   "listener",
   "login.qr.state",
 ] as const;

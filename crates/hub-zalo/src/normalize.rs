@@ -5,8 +5,8 @@
 //! and this module does not invent `logged_out` or `expired` for a dropped socket.
 
 use hub_core::{
-    Attachment, AttachmentKind, AttachmentSource, ConversationId, Mention, MessageRef, RemoteEvent,
-    RemoteMessage, SessionState,
+    Attachment, AttachmentKind, AttachmentSource, ConversationId, ConversationKind, DirectoryTitle,
+    Mention, MessageRef, Network, RemoteEvent, RemoteMessage, SessionState,
 };
 use serde_json::Value;
 
@@ -38,6 +38,7 @@ pub fn remote_event(event: &SidecarEvent) -> Option<RemoteEvent> {
         "group_event" => group_event(&event.data),
         "friend_request" => friend_event(&event.data),
         "session" => session_event(&event.data),
+        "directory" => directory_event(&event.data),
         _ => None,
     }
 }
@@ -137,6 +138,43 @@ fn friend_event(data: &Value) -> Option<RemoteEvent> {
     })
 }
 
+fn directory_event(data: &Value) -> Option<RemoteEvent> {
+    let items = data.get("entries")?.as_array()?;
+    let mut entries = Vec::new();
+    for item in items {
+        let Some(row) = directory_row(item) else {
+            continue;
+        };
+        entries.push(row);
+    }
+    Some(RemoteEvent::DirectorySnapshot { entries })
+}
+
+fn directory_row(item: &Value) -> Option<DirectoryTitle> {
+    let kind = match string_field(item, "kind")?.as_str() {
+        "dm" => ConversationKind::Dm,
+        "group" => ConversationKind::Group,
+        _ => return None,
+    };
+    let external_id = string_field(item, "id")?;
+    if external_id.is_empty() {
+        return None;
+    }
+    let title = string_field(item, "name")?;
+    let title = title.trim();
+    if title.is_empty() || title == external_id {
+        return None;
+    }
+    Some(DirectoryTitle {
+        conversation: ConversationId {
+            network: Network::Zalo,
+            kind,
+            external_id,
+        },
+        title: title.to_owned(),
+    })
+}
+
 fn session_event(data: &Value) -> Option<RemoteEvent> {
     let state = string_field(data, "state")?;
     let mapped = match state.as_str() {
@@ -226,7 +264,7 @@ fn i64_field(value: &Value, key: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hub_core::SessionState;
+    use hub_core::{ConversationKind, SessionState};
 
     #[test]
     fn disconnected_session_is_not_a_remote_event() {
@@ -290,5 +328,35 @@ mod tests {
             RemoteEvent::ChatInfo { title: Some(title), .. } if title == "Team"
         ));
         assert!(matches!(events[1], RemoteEvent::GroupEvent { .. }));
+    }
+
+    #[test]
+    fn a_directory_snapshot_keeps_real_names_only() {
+        let event = SidecarEvent {
+            name: "directory".into(),
+            data: serde_json::json!({
+                "entries": [
+                    {"kind": "dm", "id": "1001", "name": "An"},
+                    {"kind": "group", "id": "1002", "name": "  "},
+                    {"kind": "group", "id": "1003", "name": "1003"},
+                    {"kind": "channel", "id": "1004", "name": "Nope"},
+                    {"kind": "group", "id": "1005", "name": "Binh"}
+                ]
+            }),
+        };
+        assert!(matches!(
+            remote_event(&event),
+            Some(RemoteEvent::DirectorySnapshot { entries })
+                if entries.len() == 2
+                    && entries[0].conversation.kind == ConversationKind::Dm
+                    && entries[0].conversation.external_id == "1001"
+                    && entries[0].title == "An"
+                    && entries[1].title == "Binh"
+        ));
+        let missing = SidecarEvent {
+            name: "directory".into(),
+            data: serde_json::json!({}),
+        };
+        assert!(remote_event(&missing).is_none());
     }
 }

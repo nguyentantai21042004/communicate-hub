@@ -29,7 +29,10 @@ describe("directory book", () => {
         return [{ id: "g1", name: "Team", avatar_url: "https://cdn.example/g1.jpg" }];
       },
     };
-    const book = new DirectoryBook(source, DIRECTORY_TTL_MS, () => now);
+    let fresh = 0;
+    const book = new DirectoryBook(source, DIRECTORY_TTL_MS, () => now, () => {
+      fresh += 1;
+    });
     book.warm();
     await book.lookup("dm", "u1");
     await book.lookup("group", "g1");
@@ -46,6 +49,7 @@ describe("directory book", () => {
     await book.lookup("dm", "u1");
     expect(friends).toBe(3);
     expect(groups).toBe(3);
+    expect(fresh).toBe(3);
   });
 
   it("shares one in-flight fetch and backs off on rate_limited", async () => {
@@ -77,7 +81,10 @@ describe("directory book", () => {
         throw new Error("groups should not run");
       },
     };
-    const blocked = new DirectoryBook(limited, DIRECTORY_TTL_MS, () => now);
+    let fresh = 0;
+    const blocked = new DirectoryBook(limited, DIRECTORY_TTL_MS, () => now, () => {
+      fresh += 1;
+    });
     expect(await blocked.lookup("dm", "u1")).toBeUndefined();
     const afterLimit = friends;
     now += 1_000;
@@ -86,5 +93,6 @@ describe("directory book", () => {
     now += 30_000;
     expect(await blocked.lookup("dm", "u1")).toBeUndefined();
     expect(friends).toBe(afterLimit + 1);
+    expect(fresh).toBe(0);
   });
 });

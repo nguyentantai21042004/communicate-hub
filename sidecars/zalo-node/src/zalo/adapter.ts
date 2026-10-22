@@ -28,6 +28,26 @@ import type { ZaloWireMessage } from "./wire.js";
 const RECONNECT_DELAY_MS = 5_000;
 const MAX_RECONNECT_DELAY_MS = 5 * 60_000;
 const CLOSE_NORMAL = 1000;
+
+function directorySnapshot(
+  friends: DirectoryEntry[],
+  groups: DirectoryEntry[],
+): Array<{ kind: "dm" | "group"; id: string; name: string }> {
+  return [...namedEntries("dm", friends), ...namedEntries("group", groups)];
+}
+
+function namedEntries(
+  kind: "dm" | "group",
+  entries: DirectoryEntry[],
+): Array<{ kind: "dm" | "group"; id: string; name: string }> {
+  const out: Array<{ kind: "dm" | "group"; id: string; name: string }> = [];
+  for (const entry of entries) {
+    const name = entry.name.trim();
+    if (entry.id.length === 0 || name.length === 0 || name === entry.id) continue;
+    out.push({ kind, id: entry.id, name });
+  }
+  return out;
+}
 const QR_WAIT_MS = 20_000;
 
 type SessionName = "valid" | "expired" | "disconnected" | "reconnecting";
@@ -103,7 +123,9 @@ export class ZaloBridge {
 
   constructor(private readonly deps: BridgeDeps) {
     this.directory = new ZaloDirectory(deps.session);
-    this.book = new DirectoryBook(this.directory, DIRECTORY_TTL_MS, deps.now);
+    this.book = new DirectoryBook(this.directory, DIRECTORY_TTL_MS, deps.now, (friends, groups) => {
+      this.deps.emit("directory", { entries: directorySnapshot(friends, groups) });
+    });
   }
 
   async start(): Promise<void> {

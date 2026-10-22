@@ -64,6 +64,11 @@ pub enum RemoteEvent {
         /// New session state.
         state: SessionState,
     },
+    /// A directory fetch finished. The names are already in that fetch.
+    DirectorySnapshot {
+        /// Conversations whose display name is known.
+        entries: Vec<DirectoryTitle>,
+    },
 }
 
 /// A new message on a source network.
@@ -103,6 +108,15 @@ pub struct RemoteEdit {
     pub attachments: Vec<Attachment>,
     /// When the edit happened, as Unix seconds.
     pub edited_at_unix_secs: i64,
+}
+
+/// A conversation name learned from a directory snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryTitle {
+    /// Conversation the name belongs to.
+    pub conversation: ConversationId,
+    /// Display name. Empty and id-equal names are omitted by the adapter.
+    pub title: String,
 }
 
 /// A person named in a [`RemoteMessage`].
@@ -311,6 +325,19 @@ mod tests {
                 state: SessionState::Expired,
             },
             r#"{"type":"session_changed","state":"expired"}"#,
+        )?;
+
+        assert_wire(
+            &RemoteEvent::DirectorySnapshot {
+                entries: vec![DirectoryTitle {
+                    conversation: conversation(Network::Zalo, ConversationKind::Dm, "user-1"),
+                    title: "An".into(),
+                }],
+            },
+            concat!(
+                r#"{"type":"directory_snapshot","entries":[{"conversation":"zalo:dm:user-1","#,
+                r#""title":"An"}]}"#
+            ),
         )?;
         Ok(())
     }

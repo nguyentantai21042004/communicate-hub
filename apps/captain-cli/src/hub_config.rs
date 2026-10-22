@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use hub_bridge::{BACKFILL_RENAME_CAP, BACKFILL_RENAME_GAP_SECS};
 
 /// File name inside the state directory.
 pub const HUB_FILE: &str = "hub.toml";
@@ -36,6 +37,10 @@ pub struct HubConfig {
     pub media_retention_days: i64,
     /// Pin one avatar photo the first time a topic is created.
     pub avatar_card: bool,
+    /// Placeholder topics one directory pass renames. The rest wait for the next pass.
+    pub backfill_rename_cap: usize,
+    /// Seconds between those renames. Zero waits nothing. The wait ends with the pass.
+    pub backfill_rename_gap_secs: i64,
 }
 
 impl HubConfig {
@@ -84,6 +89,8 @@ impl HubConfig {
         let admin_user_ids = int_array(table, "admin_user_ids")?;
         let skip_muted_zalo_groups = bool_field(table, "skip_muted_zalo_groups", false)?;
         let avatar_card = bool_field(table, "avatar_card", true)?;
+        let backfill_rename_cap = rename_cap(table)?;
+        let backfill_rename_gap_secs = rename_gap(table)?;
         let sidecar_program = match table.get("sidecar_program") {
             None => DEFAULT_PROGRAM.to_owned(),
             Some(toml::Value::String(value)) if !value.is_empty() => value.clone(),
@@ -121,7 +128,26 @@ impl HubConfig {
                 DEFAULT_MEDIA_RETENTION_DAYS,
             )?,
             avatar_card,
+            backfill_rename_cap,
+            backfill_rename_gap_secs,
         })
+    }
+}
+
+fn rename_cap(table: &toml::map::Map<String, toml::Value>) -> Result<usize> {
+    match optional_i64(table, "backfill_rename_cap")? {
+        None => Ok(BACKFILL_RENAME_CAP),
+        Some(value) if value > 0 => usize::try_from(value)
+            .map_err(|_| anyhow::anyhow!("hub.toml: backfill_rename_cap is out of range")),
+        Some(_) => bail!("hub.toml: backfill_rename_cap must be positive"),
+    }
+}
+
+fn rename_gap(table: &toml::map::Map<String, toml::Value>) -> Result<i64> {
+    match optional_i64(table, "backfill_rename_gap_secs")? {
+        None => Ok(BACKFILL_RENAME_GAP_SECS),
+        Some(value) if value >= 0 => Ok(value),
+        Some(_) => bail!("hub.toml: backfill_rename_gap_secs must be zero or positive"),
     }
 }
 
@@ -263,6 +289,19 @@ mod tests {
         assert_eq!(config.admin_user_ids, vec![7]);
         assert_eq!(config.ops_topic_id, None);
         assert!(config.avatar_card);
+        assert_eq!(config.backfill_rename_cap, BACKFILL_RENAME_CAP);
+        assert_eq!(config.backfill_rename_gap_secs, BACKFILL_RENAME_GAP_SECS);
+        let tuned = HubConfig::parse(
+            "group_id = -100123\nsidecar_args = [\"fixture.js\"]\nbackfill_rename_cap = 2\nbackfill_rename_gap_secs = 0\n",
+        )
+        .unwrap();
+        assert_eq!(tuned.backfill_rename_cap, 2);
+        assert_eq!(tuned.backfill_rename_gap_secs, 0);
+        let bad_cap = HubConfig::parse(
+            "group_id = -100123\nsidecar_args = [\"fixture.js\"]\nbackfill_rename_cap = 0\n",
+        )
+        .unwrap_err();
+        assert!(bad_cap.to_string().contains("backfill_rename_cap"));
         let off = HubConfig::parse(
             "group_id = -100123\nsidecar_args = [\"fixture.js\"]\navatar_card = false\n",
         )

@@ -25,6 +25,8 @@ pub use config::BridgeConfig;
 pub use error::{Error, Result};
 pub use hub_core::{RemoteEvent, TgMessageId, TopicId};
 pub use incoming::TopicIncoming;
+/// How many placeholder topics one directory pass renames, and the seconds between them.
+pub use limits::{BACKFILL_RENAME_CAP, BACKFILL_RENAME_GAP_SECS};
 pub use reaction::{
     TELEGRAM_REACTIONS, is_telegram_reaction, to_network_reaction, to_telegram_reaction,
 };

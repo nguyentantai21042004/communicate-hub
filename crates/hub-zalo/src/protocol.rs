@@ -33,6 +33,7 @@ pub const EVENT_NAMES: &[&str] = &[
     "group_event",
     "friend_request",
     "session",
+    "directory",
     "listener",
     "login.qr.state",
 ];

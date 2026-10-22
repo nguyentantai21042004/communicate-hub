@@ -27,6 +27,7 @@ export class DirectoryBook {
     private readonly source: DirectoryBookSource,
     private readonly ttlMs: number,
     private readonly now: () => number,
+    private readonly onFresh?: (friends: DirectoryEntry[], groups: DirectoryEntry[]) => void,
   ) {}
 
   /** Starts the once-per-process fetch. Failures stay inside the book. */
@@ -75,6 +76,7 @@ export class DirectoryBook {
       this.fetchedAt = this.now();
       this.unknownUsed = false;
       this.misses.clear();
+      this.onFresh?.(friends, groups);
       return true;
     } catch (err) {
       if (friends) this.friends = index(friends);
