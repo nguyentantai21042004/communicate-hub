@@ -1,0 +1,21 @@
+[package]
+name = "hub-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+captain-store.workspace = true
+hub-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+captain-core.workspace = true
+captain-inbox.workspace = true
+
+[lints]
+workspace = true
