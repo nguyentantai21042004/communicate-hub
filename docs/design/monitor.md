@@ -14,6 +14,11 @@ explicit labels that M5 needs. It sends nothing to Telegram.
 - `captain ui serve` shows the same page from the store alone while the daemon is stopped, for
   example to read the report on another copy of the database. It takes the session lock, so it
   cannot run next to the daemon.
+- `captain ui serve --attach` serves the same pages from the shared `inbox.sqlite` next to a
+  running daemon and `captain hub run`. It does not take `session.lock` or `hub.lock`, does not
+  open Telegram, and does not create or migrate the store. Default port is 8788 (`CAPTAIN_UI_PORT`
+  still overrides; a taken port still fails). The token is the existing `ui_token` file; it is
+  not rotated. The daemon's own UI on 8787 is unchanged.
 - The assets are plain HTML, CSS and JavaScript compiled into the binary. There is no build step
   and nothing is fetched from the network.
 
@@ -51,6 +56,15 @@ presses Show text, and the page inserts it as text, never as HTML.
 
 Pause and resume are `POST /api/pause` and `POST /api/resume`. Every API route answers the same
 JSON as the matching socket method, because both call the same functions in `app.rs`.
+
+`--attach` opens a read-only `SQLite` connection (`query_only`, busy timeout, no migrations).
+`GET /api/status` includes `read_only: true`. If the daemon's socket answers, that status is
+shown as-is; otherwise the connection card is `offline` ("Offline view") from the store.
+Write routes answer 403 `{"error": "read-only attach mode"}`: `POST /api/pause`,
+`POST /api/resume`, `POST /api/tickets/{id}/label`, `POST /api/scope/reload`,
+`POST /api/history`, `POST /api/zalo/relogin`, and `POST /api/zalo/retry/{id}`. The pages hide
+or disable those controls. The process has no background jobs beyond the HTTP server. A missing
+store file or a newer schema than this binary knows exits non-zero.
 
 ## Dashboard endpoints
 
@@ -121,6 +135,7 @@ answer 501 with `{"error": "..."}` until a Zalo admin can run them.
 ```sh
 captain --state-dir /tmp/captain-demo dev seed-demo   # 14 days of invented data
 captain --state-dir /tmp/captain-demo ui serve        # prints the address; Ctrl-C stops it
+captain --state-dir /tmp/captain-demo ui serve --attach  # port 8788; store must already exist
 ```
 
 `seed-demo` refuses a store that already has tickets and needs an explicit `--state-dir`, so it

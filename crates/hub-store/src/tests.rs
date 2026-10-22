@@ -238,6 +238,46 @@ fn newer_hub_schema_is_refused_without_losing_rows() {
 }
 
 #[test]
+fn read_only_open_does_not_create_or_write() {
+    let tmp = Tmp::new();
+    let missing = tmp.0.join("nope").join("inbox.sqlite");
+    assert!(matches!(
+        Hub::open_read_only(&missing),
+        Err(Error::Captain(captain_store::Error::NotFound(_)))
+    ));
+    assert!(!missing.exists());
+
+    let path = tmp.path();
+    let mut hub = Hub::open(&path).unwrap();
+    hub.upsert_conversation(&conversation(Network::Zalo, "g", 1))
+        .unwrap();
+    drop(hub);
+    let before = std::fs::read(&path).unwrap();
+    let mut reader = Hub::open_read_only(&path).unwrap();
+    assert_eq!(reader.schema_version().unwrap(), 2);
+    assert_eq!(reader.reader().conversations().unwrap().len(), 1);
+    assert!(
+        reader
+            .upsert_conversation(&conversation(Network::Zalo, "h", 2))
+            .is_err()
+    );
+    drop(reader);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE hub_schema SET version = 99", [])
+        .unwrap();
+    drop(conn);
+    assert!(matches!(
+        Hub::open_read_only(&path),
+        Err(Error::NewerSchema {
+            found: 99,
+            supported: 2
+        })
+    ));
+}
+
+#[test]
 fn counters_aggregate_across_days_and_sources() {
     let mut hub = Hub::open_in_memory().unwrap();
     let telegram = ConversationId {

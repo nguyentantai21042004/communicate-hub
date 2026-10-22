@@ -198,6 +198,11 @@
   }
 
   function historyCard(chats) {
+    if (Captain.readOnly()) {
+      return Captain.h("section", { class: "section", "aria-labelledby": "h-history" },
+        Captain.h("h2", { id: "h-history" }, "Tìm lịch sử chat"),
+        Captain.h("p", { class: "muted" }, "Chế độ xem. Không tìm trên Telegram."));
+    }
     const form = Captain.h("form", { class: "filters", id: "history-form" });
     const chatOptions = chats.map((row) => Captain.h("option", { value: row.external_id }, `${row.title || "Untitled"} (${row.external_id})`));
     const chatField = chats.length

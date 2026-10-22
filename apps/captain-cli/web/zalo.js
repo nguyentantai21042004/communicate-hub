@@ -75,7 +75,7 @@
     const tone = { valid: "ok", expired: "bad", logged_out: "bad", connecting: "warn", unknown: "muted" }[state] || "muted";
     const label = { valid: "Hợp lệ", expired: "Hết hạn", logged_out: "Đã đăng xuất", connecting: "Đang kết nối", unknown: "Chưa rõ" }[state] || state;
     const storage = { keychain: "macOS Keychain", none: "không lưu" }[session.storage] || session.storage || "-";
-    const button = Captain.h("button", {
+    const button = Captain.readOnly() ? null : Captain.h("button", {
       type: "button",
       class: "btn btn-quiet",
       onclick: (event) => Captain.reloginZalo(event.currentTarget),
@@ -91,7 +91,7 @@
       ].map(([name, value]) => [Captain.h("dt", {}, name), Captain.h("dd", {}, value)])),
       Captain.h("p", { class: "muted" }, "Không hiện cookie, token, hay chuỗi session."),
       button,
-      down(page) ? Captain.h("p", { class: "muted" }, "Nút này sẽ báo chưa kết nối bridge khi bridge tắt.") : null);
+      button && down(page) ? Captain.h("p", { class: "muted" }, "Nút này sẽ báo chưa kết nối bridge khi bridge tắt.") : null);
   }
 
   function queueCard(page) {
@@ -223,13 +223,13 @@
       const when = F.formatStamp(event.at_unix_secs, true);
       const reason = event.reason || "-";
       const conversation = event.conversation || "-";
-      const button = () => (event.retryable
+      const button = () => (event.retryable && !Captain.readOnly()
         ? Captain.h("button", {
           type: "button",
           class: "btn btn-quiet btn-sm",
           onclick: (click) => Captain.retryZalo(event.id, click.currentTarget),
         }, "Thử lại")
-        : Captain.h("span", { class: "muted" }, "Không thử lại được"));
+        : Captain.h("span", { class: "muted" }, event.retryable ? "Chế độ xem" : "Không thử lại được"));
       const desk = button();
       const phone = button();
       return {

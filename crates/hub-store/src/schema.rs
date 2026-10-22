@@ -160,6 +160,30 @@ fn column_exists(conn: &Connection, column: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Refuses a hub schema written by a newer build. Missing `hub_schema` is version 0.
+pub(crate) fn refuse_newer(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "hub_schema")? {
+        return Ok(());
+    }
+    let found = hub_version(conn)?;
+    if found > HUB_SCHEMA_VERSION {
+        return Err(Error::NewerSchema {
+            found,
+            supported: HUB_SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 pub(crate) fn hub_version(conn: &Connection) -> Result<i64> {
     let found: Option<i64> =
         conn.query_row("SELECT max(version) FROM hub_schema", [], |row| row.get(0))?;

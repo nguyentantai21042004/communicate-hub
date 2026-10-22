@@ -14,6 +14,9 @@ pub enum Error {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The database file is missing, so a read-only open cannot proceed.
+    #[error("store file {} does not exist", .0.display())]
+    NotFound(std::path::PathBuf),
     /// The database was migrated by a newer build, which this build cannot read safely.
     #[error("store schema version {found} is newer than this build's {supported}")]
     NewerSchema {

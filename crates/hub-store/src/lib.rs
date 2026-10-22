@@ -31,7 +31,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::limits::BUSY_TIMEOUT_SECS;
 
@@ -56,6 +56,27 @@ impl Hub {
         captain_store::Store::open(path)?;
         let conn = Connection::open(path)?;
         init(conn, true)
+    }
+
+    /// Opens an existing hub database for reads. The file is not created and is not migrated.
+    ///
+    /// Captain's `user_version` and `hub_schema` are checked. The connection is `SQLite`
+    /// read-only with `query_only`, so this process cannot write hub tables.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Captain`] when the file is missing or Captain's schema is newer than this
+    /// build, [`Error::NewerSchema`] when `hub_schema` is newer, and [`Error::Sqlite`] when
+    /// the file cannot be opened.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let _checked = captain_store::Store::open_read_only(path)?;
+        drop(_checked);
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(BUSY_TIMEOUT_SECS))?;
+        conn.pragma_update(None, "query_only", true)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        schema::refuse_newer(&conn)?;
+        Ok(Hub { conn })
     }
 
     /// An empty database in memory, with Captain's schema and the hub tables, for tests.

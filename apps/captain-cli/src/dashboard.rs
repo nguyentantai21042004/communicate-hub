@@ -67,11 +67,23 @@ const MODULE_ORDER: [&str; 3] = [MODULE_CAPTAIN_DAEMON, MODULE_ZALO_BRIDGE, MODU
 #[derive(Clone)]
 pub(crate) struct Adapter {
     app: Arc<App>,
+    read_only: bool,
 }
 
 impl Adapter {
     pub(crate) fn new(app: Arc<App>) -> Self {
-        Self { app }
+        Self {
+            app,
+            read_only: false,
+        }
+    }
+
+    /// Same as [`Self::new`], opening the hub store read-only.
+    pub(crate) fn attach(app: Arc<App>) -> Self {
+        Self {
+            app,
+            read_only: true,
+        }
     }
 }
 
@@ -84,22 +96,25 @@ struct Loaded {
 impl HubApi for Adapter {
     async fn overview(&self, query: OverviewQuery) -> Result<Overview> {
         let app = Arc::clone(&self.app);
+        let read_only = self.read_only;
         let now = now_unix();
         let offset = local_offset_minutes(now);
-        block(move || overview_at(&app, query, now, offset)).await
+        block(move || overview_at(&app, query, now, offset, read_only)).await
     }
 
     async fn conversations(&self, query: ConversationQuery) -> Result<ConversationPage> {
         let app = Arc::clone(&self.app);
+        let read_only = self.read_only;
         let now = now_unix();
-        block(move || conversations_at(&app, &query, now)).await
+        block(move || conversations_at(&app, &query, now, read_only)).await
     }
 
     async fn analytics(&self, query: AnalyticsQuery) -> Result<Analytics> {
         let app = Arc::clone(&self.app);
+        let read_only = self.read_only;
         let now = now_unix();
         let offset = local_offset_minutes(now);
-        block(move || analytics_at(&app, query, now, offset)).await
+        block(move || analytics_at(&app, query, now, offset, read_only)).await
     }
 
     async fn telegram(&self, query: DaysQuery) -> Result<TelegramPage> {
@@ -147,15 +162,17 @@ impl HubApi for Adapter {
 
     async fn zalo(&self, _query: DaysQuery) -> Result<ZaloPage> {
         let app = Arc::clone(&self.app);
+        let read_only = self.read_only;
         let now = now_unix();
-        block(move || zalo_at(&app, now)).await
+        block(move || zalo_at(&app, now, read_only)).await
     }
 
     async fn modules(&self) -> Result<ModuleList> {
         let app = Arc::clone(&self.app);
+        let read_only = self.read_only;
         let now = now_unix();
         block(move || {
-            let hub = open_hub(&app)?;
+            let hub = open_hub(&app, read_only)?;
             Ok(ModuleList {
                 modules: module_strip(&app, &hub.reader(), now)?,
             })
@@ -192,8 +209,12 @@ async fn block<T: Send + 'static>(
     }
 }
 
-fn open_hub(app: &App) -> anyhow::Result<hub_store::Hub> {
-    hub_store::Hub::open(&app.paths.store()).context("hub store")
+fn open_hub(app: &App, read_only: bool) -> anyhow::Result<hub_store::Hub> {
+    if read_only {
+        hub_store::Hub::open_read_only(&app.paths.store()).context("hub store")
+    } else {
+        hub_store::Hub::open(&app.paths.store()).context("hub store")
+    }
 }
 
 fn metric_source(source: SourceFilter) -> MetricSource {
@@ -240,8 +261,9 @@ fn overview_at(
     query: OverviewQuery,
     now: i64,
     offset_minutes: i32,
+    read_only: bool,
 ) -> anyhow::Result<Overview> {
-    let hub = open_hub(app)?;
+    let hub = open_hub(app, read_only)?;
     let reader = hub.reader();
     let days = i64::from(query.days);
     let card = hub_analytics::overview(&reader, now, days, metric_source(query.source))
@@ -404,8 +426,9 @@ fn analytics_at(
     query: AnalyticsQuery,
     now: i64,
     offset_minutes: i32,
+    read_only: bool,
 ) -> anyhow::Result<Analytics> {
-    let hub = open_hub(app)?;
+    let hub = open_hub(app, read_only)?;
     let reader = hub.reader();
     let days = i64::from(query.days);
     let metric = metric_source(query.source);
@@ -476,6 +499,7 @@ fn conversations_at(
     app: &App,
     query: &ConversationQuery,
     now: i64,
+    read_only: bool,
 ) -> anyhow::Result<ConversationPage> {
     let kind = match query.kind {
         Some(ConversationKindFilter::Channel | ConversationKindFilter::Forum) => {
@@ -488,7 +512,7 @@ fn conversations_at(
         Some(ConversationKindFilter::Group) => Some(HubKind::Group),
         None => None,
     };
-    let hub = open_hub(app)?;
+    let hub = open_hub(app, read_only)?;
     let page = hub_analytics::conversations_page(
         &hub.reader(),
         now,
@@ -529,8 +553,8 @@ fn conversations_at(
     })
 }
 
-fn zalo_at(app: &App, now: i64) -> anyhow::Result<ZaloPage> {
-    let hub = open_hub(app)?;
+fn zalo_at(app: &App, now: i64, read_only: bool) -> anyhow::Result<ZaloPage> {
+    let hub = open_hub(app, read_only)?;
     let reader = hub.reader();
     let stored = reader.modules().context("modules")?;
     let bridge = stored
@@ -1700,6 +1724,7 @@ mod tests {
             },
             now,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(count_of(&overview.kpi.messages_24h, Source::Telegram), 2);
@@ -1728,6 +1753,7 @@ mod tests {
             },
             at,
             offset,
+            false,
         )
         .unwrap();
         assert_eq!(overview.series.len(), 1);
@@ -1741,6 +1767,7 @@ mod tests {
             },
             at,
             offset,
+            false,
         )
         .unwrap();
         let cell = analytics

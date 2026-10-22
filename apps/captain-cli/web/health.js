@@ -84,7 +84,7 @@
     const wait = queue.retry_after_secs === null || queue.retry_after_secs === undefined
       ? "không có retry_after"
       : `retry_after ${F.formatDuration(queue.retry_after_secs)}`;
-    const button = Captain.h("button", {
+    const button = Captain.readOnly() ? null : Captain.h("button", {
       type: "button",
       class: "btn",
       onclick: (event) => Captain.reloginZalo(event.currentTarget),

@@ -14,7 +14,7 @@ mod tickets;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 pub use error::{Error, Result};
 pub use messages::StoredMessage;
@@ -66,6 +66,28 @@ impl Store {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
+    }
+
+    /// Opens an existing store for reads. The file is not created and is not migrated.
+    ///
+    /// The connection is `SQLite` read-only with `query_only`, so this process cannot write
+    /// tickets, metrics, or settings. A busy timeout waits while another process holds a write
+    /// lock.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when `path` does not exist, [`Error::NewerSchema`] when a newer
+    /// build already migrated it, and [`Error::Sqlite`] when it cannot be opened.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if !path.is_file() {
+            return Err(Error::NotFound(path.to_owned()));
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "query_only", true)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        schema::refuse_newer(&conn)?;
+        Ok(Self { conn })
     }
 
     /// An empty store in memory, for tests.
@@ -248,6 +270,45 @@ mod tests {
         assert!(Store::open(&path).unwrap().paused().unwrap());
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, PRIVATE_FILE_MODE);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_only_open_does_not_create_or_migrate_and_rejects_writes() {
+        let dir = std::env::temp_dir().join(format!(
+            "captain-store-ro-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let missing = dir.join("missing").join("inbox.sqlite");
+        assert!(matches!(
+            Store::open_read_only(&missing),
+            Err(Error::NotFound(_))
+        ));
+        assert!(!missing.exists());
+        assert!(!dir.join("missing").exists());
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.sqlite");
+        let writer = Store::open(&path).unwrap();
+        writer.set_paused(true).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
+        assert!(reader.paused().unwrap());
+        assert!(reader.set_paused(false).is_err());
+        assert!(writer.paused().unwrap());
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 99).unwrap();
+        drop(conn);
+        assert!(matches!(
+            Store::open_read_only(&path),
+            Err(Error::NewerSchema { found: 99, .. })
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

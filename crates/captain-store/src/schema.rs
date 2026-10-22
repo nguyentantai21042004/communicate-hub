@@ -131,12 +131,19 @@ CREATE TABLE gate_drops (
 );
 "];
 
-pub(crate) fn migrate(conn: &Connection) -> Result<()> {
+/// Refuses a file migrated by a newer build. Does not apply migrations.
+pub(crate) fn refuse_newer(conn: &Connection) -> Result<()> {
     let supported = i64::try_from(MIGRATIONS.len()).unwrap_or(i64::MAX);
     let found: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if found > supported {
         return Err(Error::NewerSchema { found, supported });
     }
+    Ok(())
+}
+
+pub(crate) fn migrate(conn: &Connection) -> Result<()> {
+    refuse_newer(conn)?;
+    let found: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     for (version, sql) in (1..)
         .zip(MIGRATIONS)
         .skip(usize::try_from(found).unwrap_or(0))

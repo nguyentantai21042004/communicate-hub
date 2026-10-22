@@ -16,6 +16,7 @@ import {
   formatShare,
   heatmapGrid,
   heatmapLevel,
+  isReadOnly,
   isWeekendDay,
   moduleHealthRatio,
   edgeFade,
@@ -31,6 +32,15 @@ import {
 function fixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
 }
+
+test("isReadOnly is true only when status.read_only is the boolean true", () => {
+  assert.equal(isReadOnly(null), false);
+  assert.equal(isReadOnly(undefined), false);
+  assert.equal(isReadOnly({}), false);
+  assert.equal(isReadOnly({ read_only: false }), false);
+  assert.equal(isReadOnly({ read_only: "true" }), false);
+  assert.equal(isReadOnly({ read_only: true }), true);
+});
 
 test("relative time uses Vietnamese units and a short just-now window", () => {
   const now = 1_700_000_000;

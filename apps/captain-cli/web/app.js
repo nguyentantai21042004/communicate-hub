@@ -198,6 +198,10 @@ function bridgePill(modules) {
   return pill(label, tone);
 }
 
+function readOnly() {
+  return Boolean(globalThis.CaptainFormat && CaptainFormat.isReadOnly(ui.status));
+}
+
 function renderStatus() {
   const s = ui.status;
   $("profile").textContent = s.me && s.me.name ? `${s.profile} · ${s.me.name}` : s.profile;
@@ -220,11 +224,20 @@ function renderStatus() {
   parts.push(h("span", {}, `Last day: ${t.queued || 0} queued, ${t.digest || 0} digest, ${t.skipped || 0} skipped`));
   replace($("status"), parts);
 
+  const locked = readOnly();
   const btn = $("pause");
-  btn.disabled = false;
-  btn.textContent = s.paused ? "Resume" : "Pause";
-  btn.setAttribute("aria-pressed", s.paused ? "true" : "false");
-  btn.title = s.paused ? "Create tickets again" : "Stop creating tickets; messages are still stored";
+  btn.hidden = locked;
+  btn.disabled = locked;
+  if (!locked) {
+    btn.textContent = s.paused ? "Resume" : "Pause";
+    btn.setAttribute("aria-pressed", s.paused ? "true" : "false");
+    btn.title = s.paused ? "Create tickets again" : "Stop creating tickets; messages are still stored";
+  }
+  const reload = $("scope-reload");
+  if (reload) {
+    reload.hidden = locked;
+    reload.disabled = locked;
+  }
 }
 
 async function togglePause() {
@@ -384,13 +397,15 @@ function renderDetail() {
   ];
   if (t.note) facts.push(["Note", t.note]);
 
-  const labels = h("div", { class: "label-group", role: "group", "aria-labelledby": "label-title" },
-    Object.entries(EXPLICIT).map(([value, text]) => h("button", {
-      type: "button",
-      class: "btn btn-quiet",
-      "aria-pressed": t.label_explicit === value ? "true" : "false",
-      onclick: () => setLabel(t.id, t.label_explicit === value ? null : value),
-    }, text)));
+  const labels = readOnly()
+    ? h("p", { class: "muted" }, t.label_explicit ? `Label: ${EXPLICIT[t.label_explicit]}` : "Read-only attach; labels cannot be changed.")
+    : h("div", { class: "label-group", role: "group", "aria-labelledby": "label-title" },
+      Object.entries(EXPLICIT).map(([value, text]) => h("button", {
+        type: "button",
+        class: "btn btn-quiet",
+        "aria-pressed": t.label_explicit === value ? "true" : "false",
+        onclick: () => setLabel(t.id, t.label_explicit === value ? null : value),
+      }, text)));
 
   const byId = new Map(bodies.map((b) => [b.id, b]));
   const msgList = h("ol", { class: "messages" }, messages.map((m) => {
@@ -412,8 +427,8 @@ function renderDetail() {
   replace(pane,
     detailHead(`${t.chat_label}${t.topic ? ` · topic ${t.topic}` : ""}`),
     h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
-    h("h3", { id: "label-title" }, "Would you want a draft for this?"),
-    h("p", { class: "muted" }, "Your label feeds explicit precision (M5). Press again to clear it."),
+    readOnly() ? null : h("h3", { id: "label-title" }, "Would you want a draft for this?"),
+    readOnly() ? null : h("p", { class: "muted" }, "Your label feeds explicit precision (M5). Press again to clear it."),
     labels,
     h("div", { class: "block" },
       h("div", { class: "view-head" },
@@ -1194,6 +1209,7 @@ window.Captain = {
   $, h, svg, append, replace, pill, stateBox, skeleton, toast, api, ApiError,
   when, ago, duration, table, ui, VIEWS, registerView, start, TRIGGERS,
   sectionBlock, reliabilityBlock, healthBanners, rightNowBlock, confirmDialog, reloginZalo, retryZalo,
+  readOnly,
   placeTip, rove, readJson, writeJson, readRange, writeRange, bindRangeToolbar, bindDaysToolbar,
   copyText, sourceLabel, kindLabel, labelName, moduleLabel, moduleTone, stillCurrent,
   openQueuedTickets, sparkline, hbar, splitView, labeledCard,

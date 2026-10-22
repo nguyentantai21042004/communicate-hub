@@ -48,10 +48,11 @@ The sidecar does not send a muted field.
 | `~/Library/Logs/comms-hub` | launchd and `hub run --log-dir`. |
 
 `hub.toml` fields: `group_id` (negative), optional `ops_topic_id` (positive, fits in i32),
-`admin_user_ids`, `skip_muted_zalo_groups` (default false), `sidecar_program`, `sidecar_args`,
-`event_retention_days` (default 30), `media_retention_days` (default 7). A bad file errors
-with `hub.toml:` and the field name. A `bot_token` key is rejected and its value is not copied
-into the error.
+`admin_user_ids`, `skip_muted_zalo_groups` (default false), `avatar_card` (default true),
+`backfill_rename_cap` (default 20), `backfill_rename_gap_secs` (default 3, zero allowed),
+`sidecar_program`, `sidecar_args`, `event_retention_days` (default 30),
+`media_retention_days` (default 7). A bad file errors with `hub.toml:` and the field name.
+A `bot_token` key is rejected and its value is not copied into the error.
 
 ## Owner steps
 
@@ -68,6 +69,8 @@ Do these yourself. Nothing in this tree starts the hub, the sidecar, or launchd.
 5. `scripts/install-hub-agent.sh`. It writes the LaunchAgent and does not call `launchctl`.
    Start it with the printed `launchctl bootstrap` command when the checks above passed.
    Stop it with the printed `bootout` command.
+6. `captain ui serve --attach` serves the new dashboard on port 8788 from `inbox.sqlite` while
+   the old daemon keeps the session and its UI on 8787.
 
 `captain hub status` reads `module_health` when `inbox.sqlite` already exists. It does not
 create the file. `captain hub zalo logout` deletes `zalo/credentials.json` and does not call
@@ -84,11 +87,30 @@ call `launchctl`.
 
 ## What this process does not do
 
-`hub-core` has no outgoing mentions, no `reply_to` on media, no topic rename, and no
-`disconnected` session state. Those are dropped or kept as health text. `hub-zalo` emits
+`hub-core` has no outgoing mentions, no `reply_to` on media, and no `disconnected` session
+state. Those are dropped or kept as health text. Topic rename is `TopicSink::rename_topic`;
+a sink that does not override it returns `Unsupported` and the bridge skips that call.
+`hub-zalo` emits
 `from_self` with no field the bridge can see, so only an already-mapped network id is dropped.
 Voice duration, rich-text style, poll score edits, e-card or link cards, and Zalo-side album
 merge are not available on the types this process is allowed to use. A Telegram file id cannot
 sit on a `hub-core` attachment, so topic media becomes a `[files: ...]` note instead of a Zalo
 upload. `dashboard::Adapter::modules` does not read this store. The commands outside the set
 above are out of scope.
+
+## Cost
+
+Friends and groups are fetched once when the sidecar listener starts, then at most once per
+24 hours (`DIRECTORY_TTL_MS`), plus at most one more fetch in that window when an event names
+an unknown conversation. `rate_limited` backs off and is not retried in a loop. One directory
+fetch is in flight at a time. Group member lists load only when a sender or mention has no
+name, stay cached for 5 minutes, and keep at most 64 groups (`GROUP_MEMBER_CACHE_MAX`).
+
+A new conversation costs one `createForumTopic`. `getForumTopicIconStickers` runs once per
+process and is reused. When the directory list already included an avatar URL, one `sendPhoto`
+and one `pinChatMessage` run once per conversation (`avatar_card`, default true). A later
+title change is one `editForumTopic`, at most once per conversation per 24 hours
+(`RENAME_INTERVAL_SECS`). One backfill pass runs per directory refresh, at most 20 renames
+(`BACKFILL_RENAME_CAP`), with 3 seconds between them (`BACKFILL_RENAME_GAP_SECS`). The wait
+ends with the pass. There is no new timer. The idle loop is still the 30 second state tick,
+the 60 second health tick, and the hourly prune.

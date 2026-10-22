@@ -250,8 +250,12 @@ enum ScopeCommand {
 
 #[derive(Subcommand)]
 enum UiCommand {
-    /// Serve the UI from the store alone, while the daemon is stopped.
-    Serve,
+    /// Serve the UI from the store. Takes the session lock unless --attach.
+    Serve {
+        /// Read-only next to a running daemon. No session lock, no Telegram.
+        #[arg(long)]
+        attach: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -467,9 +471,9 @@ async fn main() -> Result<()> {
             emit(&daemon.call(Request::ScopeReload).await?)
         }
         Command::Ui {
-            command: Some(UiCommand::Serve),
+            command: Some(UiCommand::Serve { attach }),
             ..
-        } => ui_serve(&vault, &paths).await,
+        } => ui_serve(&vault, &paths, attach).await,
         Command::Ui {
             command: None,
             open,
@@ -510,7 +514,17 @@ async fn call(vault: &Vault, paths: &Paths, request: Request) -> Result<Value> {
 
 /// The app without Telegram: store, scope and policy only.
 fn offline_app(vault: &Vault, paths: &Paths) -> Result<Arc<App>> {
-    let store = Store::open(&paths.store())?;
+    store_app(vault, paths, Store::open(&paths.store())?)
+}
+
+/// The app for `--attach`: existing store, read-only, no Telegram and no lock.
+fn attach_app(vault: &Vault, paths: &Paths) -> Result<Arc<App>> {
+    let store = Store::open_read_only(&paths.store())?;
+    let _ = Hub::open_read_only(&paths.store())?;
+    store_app(vault, paths, store)
+}
+
+fn store_app(vault: &Vault, paths: &Paths, store: Store) -> Result<Arc<App>> {
     let paused = store.paused()?;
     Ok(Arc::new(App {
         db: Db::new(store),
@@ -662,20 +676,43 @@ async fn ui(paths: &Paths, open: bool) -> Result<()> {
     open_url(&url, open)
 }
 
-async fn ui_serve(vault: &Vault, paths: &Paths) -> Result<()> {
+async fn ui_serve(vault: &Vault, paths: &Paths, attach: bool) -> Result<()> {
     // Holding the lock keeps a daemon from starting against the same port and store.
-    let _lock = paths
-        .lock_session()
-        .context("the daemon is running; use `captain ui` to open its UI")?;
-    let app = offline_app(vault, paths)?;
-    let settings = web::Settings::from_env()?;
+    // `--attach` skips it so this process can sit next to the daemon and `hub run`.
+    let _lock = if attach {
+        None
+    } else {
+        Some(
+            paths
+                .lock_session()
+                .context("the daemon is running; use `captain ui` to open its UI")?,
+        )
+    };
+    let app = if attach {
+        attach_app(vault, paths)?
+    } else {
+        offline_app(vault, paths)?
+    };
+    let settings = if attach {
+        web::Settings::from_env_or(web::DEFAULT_ATTACH_PORT)?
+    } else {
+        web::Settings::from_env()?
+    };
     let listener = web::bind(&app, &settings).await?;
     let url = settings.login_url(&paths.ui_token()?);
     open_url(&url, false)?;
-    tracing::warn!("serving the store without Telegram; press Ctrl-C to stop");
-    tokio::select! {
-        () = web::serve(app, listener, paths.ui_token()?) => {}
-        _ = tokio::signal::ctrl_c() => {}
+    if attach {
+        tracing::warn!("serving the store read-only; press Ctrl-C to stop");
+        tokio::select! {
+            () = web::serve_attach(app, listener, paths.ui_token()?) => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    } else {
+        tracing::warn!("serving the store without Telegram; press Ctrl-C to stop");
+        tokio::select! {
+            () = web::serve(app, listener, paths.ui_token()?) => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
     }
     Ok(())
 }

@@ -16,17 +16,22 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use captain_ipc::{Client, Request as IpcRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use crate::app::App;
+use crate::paths::Paths;
 
 /// Port the UI listens on unless `CAPTAIN_UI_PORT` says otherwise. It is never moved to a
 /// free port: a second server on another port is how duplicate daemons go unnoticed.
 pub const DEFAULT_PORT: u16 = 8787;
-/// Overrides [`DEFAULT_PORT`].
+/// Port for `captain ui serve --attach`. The daemon UI stays on [`DEFAULT_PORT`].
+pub const DEFAULT_ATTACH_PORT: u16 = 8788;
+/// Overrides [`DEFAULT_PORT`] and [`DEFAULT_ATTACH_PORT`].
 pub const PORT_ENV: &str = "CAPTAIN_UI_PORT";
+const ATTACH_READ_ONLY: &str = "read-only attach mode";
 
 const COOKIE_NAME: &str = "captain_ui";
 const CSRF_HEADER: &str = "x-captain";
@@ -59,12 +64,17 @@ pub struct Settings {
 impl Settings {
     /// Reads `CAPTAIN_UI_PORT`, falling back to [`DEFAULT_PORT`].
     pub fn from_env() -> Result<Self> {
+        Self::from_env_or(DEFAULT_PORT)
+    }
+
+    /// Reads `CAPTAIN_UI_PORT`, falling back to `default`.
+    pub fn from_env_or(default: u16) -> Result<Self> {
         let port = match std::env::var(PORT_ENV) {
             Ok(v) => v
                 .trim()
                 .parse()
                 .with_context(|| format!("{PORT_ENV} must be a port number"))?,
-            Err(_) => DEFAULT_PORT,
+            Err(_) => default,
         };
         Ok(Self { port })
     }
@@ -99,9 +109,15 @@ struct Web {
     app: Arc<App>,
     token: Arc<str>,
     hosts: Arc<[String]>,
+    read_only: bool,
 }
 
 fn router(state: Web) -> Router {
+    let adapter = if state.read_only {
+        crate::dashboard::Adapter::attach(Arc::clone(&state.app))
+    } else {
+        crate::dashboard::Adapter::new(Arc::clone(&state.app))
+    };
     let api = Router::new()
         .route("/status", get(status))
         .route("/tickets", get(tickets))
@@ -112,9 +128,8 @@ fn router(state: Web) -> Router {
         .route("/scope/reload", post(reload))
         .route("/pause", post(pause))
         .route("/resume", post(resume))
-        .merge(hub_web::routes(crate::dashboard::Adapter::new(Arc::clone(
-            &state.app,
-        ))))
+        .merge(hub_web::routes(adapter))
+        .route_layer(middleware::from_fn_with_state(state.clone(), reject_writes))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     Router::new()
         .route("/", get(index))
@@ -153,6 +168,15 @@ fn router(state: Web) -> Router {
 
 /// Serves until the task is cancelled.
 pub async fn serve(app: Arc<App>, listener: TcpListener, token: String) {
+    run_server(app, listener, token, false).await;
+}
+
+/// Same as [`serve`], with write routes answering 403 and `read_only` on status.
+pub async fn serve_attach(app: Arc<App>, listener: TcpListener, token: String) {
+    run_server(app, listener, token, true).await;
+}
+
+async fn run_server(app: Arc<App>, listener: TcpListener, token: String, read_only: bool) {
     let port = listener.local_addr().map_or(DEFAULT_PORT, |a| a.port());
     let state = Web {
         app,
@@ -162,6 +186,7 @@ pub async fn serve(app: Arc<App>, listener: TcpListener, token: String) {
             format!("localhost:{port}"),
         ]
         .into(),
+        read_only,
     };
     tracing::info!(port, "web UI listening on the loopback interface");
     if let Err(e) = axum::serve(listener, router(state)).await {
@@ -206,6 +231,13 @@ async fn require_token(State(web): State<Web>, request: Request, next: Next) -> 
     } else {
         api_error(StatusCode::UNAUTHORIZED, "open the UI with `captain ui`")
     }
+}
+
+async fn reject_writes(State(web): State<Web>, request: Request, next: Next) -> Response {
+    if web.read_only && request.method() != Method::GET {
+        return api_error(StatusCode::FORBIDDEN, ATTACH_READ_ONLY);
+    }
+    next.run(request).await
 }
 
 fn has_token(headers: &HeaderMap, token: &str) -> bool {
@@ -273,7 +305,27 @@ fn reply(result: Result<Value>) -> Response {
 }
 
 async fn status(State(web): State<Web>) -> Response {
-    reply(web.app.status().await)
+    reply(status_json(&web).await)
+}
+
+async fn status_json(web: &Web) -> Result<Value> {
+    let mut value = if web.read_only {
+        match attach_daemon_status(&web.app.paths).await {
+            Some(value) => value,
+            None => web.app.status().await?,
+        }
+    } else {
+        web.app.status().await?
+    };
+    if let Some(map) = value.as_object_mut() {
+        map.insert("read_only".into(), json!(web.read_only));
+    }
+    Ok(value)
+}
+
+async fn attach_daemon_status(paths: &Paths) -> Option<Value> {
+    let mut client = Client::connect(&paths.socket()).await.ok()?;
+    client.call(IpcRequest::Status).await.ok()
 }
 
 #[derive(Deserialize)]
@@ -446,16 +498,31 @@ triggers = [\"dm_all\"]
         })
     }
 
-    fn web_state(app: Arc<App>) -> Web {
+    fn web_state_mode(app: Arc<App>, read_only: bool) -> Web {
         Web {
             app,
             token: TOKEN.into(),
             hosts: vec![HOST.to_owned(), "localhost:8787".to_owned()].into(),
+            read_only,
         }
     }
 
     async fn call(
         app: &Arc<App>,
+        method: &str,
+        path: &str,
+        host: &str,
+        cookie: bool,
+        captain: bool,
+        body: Option<&str>,
+    ) -> Reply {
+        call_mode(app, false, method, path, host, cookie, captain, body).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_mode(
+        app: &Arc<App>,
+        read_only: bool,
         method: &str,
         path: &str,
         host: &str,
@@ -476,7 +543,7 @@ triggers = [\"dm_all\"]
         let request = builder
             .body(Body::from(body.unwrap_or("").to_owned()))
             .expect("request");
-        let response = router(web_state(Arc::clone(app)))
+        let response = router(web_state_mode(Arc::clone(app), read_only))
             .oneshot(request)
             .await
             .expect("response");
@@ -511,6 +578,8 @@ triggers = [\"dm_all\"]
         let signed_in = call(&app, "GET", "/api/status", HOST, true, false, None).await;
         assert_eq!(signed_in.status, StatusCode::OK);
         assert!(signed_in.body.contains("connection"));
+        let signed_in: serde_json::Value = serde_json::from_str(&signed_in.body).unwrap();
+        assert_eq!(signed_in["read_only"], false);
 
         let bad_host = call(
             &app,
@@ -766,6 +835,90 @@ triggers = [\"dm_all\"]
         )
         .await;
         assert_eq!(bad_source.status, StatusCode::BAD_REQUEST);
+    }
+
+    fn sqlite_bytes(path: &std::path::Path) -> Vec<u8> {
+        let mut bytes = std::fs::read(path).unwrap_or_default();
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        if let Ok(data) = std::fs::read(&wal) {
+            bytes.extend(data);
+        }
+        bytes
+    }
+
+    #[tokio::test]
+    async fn attach_mode_rejects_writes_and_leaves_the_store_untouched() {
+        use hub_store::Hub;
+
+        let tmp = TempDir::new("attach");
+        let store_path = tmp.0.join("inbox.sqlite");
+        let app = test_app(
+            &tmp.0,
+            Scope::parse(SCOPE_TOML, &Policy::default()).unwrap(),
+        );
+        Hub::open(&store_path).unwrap();
+        app.db
+            .run(|store| {
+                store.set_paused(false)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(app);
+        let before = sqlite_bytes(&store_path);
+        let store = Store::open_read_only(&store_path).unwrap();
+        let app = Arc::new(App {
+            db: Db::new(store),
+            paths: Paths::new(&tmp.0),
+            profile: "test".into(),
+            config: RwLock::new(Config {
+                scope: Arc::new(Scope::parse(SCOPE_TOML, &Policy::default()).unwrap()),
+                policy: Arc::new(Policy::default()),
+                scope_missing: false,
+            }),
+            paused: AtomicBool::new(false),
+            started_at: 0,
+            live: None,
+            ui_url: RwLock::new(None),
+        });
+
+        let status = call_mode(&app, true, "GET", "/api/status", HOST, true, false, None).await;
+        assert_eq!(status.status, StatusCode::OK);
+        let status: serde_json::Value = serde_json::from_str(&status.body).unwrap();
+        assert_eq!(status["read_only"], true);
+        assert_eq!(status["connection"], "offline");
+
+        let overview = call_mode(
+            &app,
+            true,
+            "GET",
+            "/api/overview?days=14",
+            HOST,
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(overview.status, StatusCode::OK);
+
+        let writes = [
+            ("POST", "/api/pause", None),
+            ("POST", "/api/resume", None),
+            ("POST", "/api/tickets/1/label", Some(r#"{"label":"want"}"#)),
+            ("POST", "/api/scope/reload", None),
+            ("POST", "/api/history", Some(r#"{"chat":42,"regex":"a"}"#)),
+            ("POST", "/api/zalo/relogin", None),
+            ("POST", "/api/zalo/retry/1", None),
+        ];
+        for (method, path, body) in writes {
+            let reply = call_mode(&app, true, method, path, HOST, true, true, body).await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{path}");
+            let json: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+            assert_eq!(json["error"], ATTACH_READ_ONLY, "{path}");
+        }
+        drop(app);
+        assert_eq!(sqlite_bytes(&store_path), before);
     }
 
     fn sample_message(stamp: i64) -> MessageView {

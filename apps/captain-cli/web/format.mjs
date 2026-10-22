@@ -8,6 +8,10 @@ export const WEEKDAYS = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"];
 const countFormat = new Intl.NumberFormat("vi-VN");
 const decimalFormat = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 1 });
 
+export function isReadOnly(status) {
+  return Boolean(status) && status.read_only === true;
+}
+
 export function relativeTime(unix, now) {
   if (unix === null || unix === undefined || unix === "") return "chưa thấy";
   const then = Number(unix);
@@ -255,6 +259,7 @@ globalThis.CaptainFormat = {
   LOW_SAMPLE_MIN,
   SECS_PER_DAY,
   WEEKDAYS,
+  isReadOnly,
   relativeTime,
   formatAge,
   formatCount,
