@@ -5,15 +5,17 @@
 //! [`TOPIC_RECREATE_LIMIT`] times. A delivery error is stored and the lane moves on.
 
 use hub_core::{
-    Attachment, ConversationId, ConversationKind, Mention, MessageRef, OutgoingMessage, RemoteEdit,
-    RemoteEvent, RemoteMessage, SessionState, TgMessageId, TopicId,
+    Attachment, AttachmentKind, AttachmentSource, ConversationId, ConversationKind, Mention,
+    MessageRef, OutgoingMessage, RemoteEdit, RemoteEvent, RemoteMessage, SessionState, TgMessageId,
+    TopicId,
 };
 
 use crate::error::Result;
 use crate::format::{notice_html, render_caption, render_text_html, topic_title};
 use crate::incoming::TopicIncoming;
 use crate::limits::{
-    FALLBACK_TOPIC_NAME, MENTION_MAX_WORDS, SINK_MAX_ATTEMPTS, TOPIC_RECREATE_LIMIT,
+    AVATAR_CARD_FILE, FALLBACK_TOPIC_NAME, MENTION_MAX_WORDS, RENAME_INTERVAL_SECS,
+    SINK_MAX_ATTEMPTS, TOPIC_RECREATE_LIMIT,
 };
 use crate::mention::{ResolvedMention, is_mention_at, next_prefix};
 use crate::reaction::{to_network_reaction, to_telegram_reaction};
@@ -57,8 +59,8 @@ where
             RemoteEvent::ChatInfo {
                 conversation,
                 title,
-                avatar: _,
-            } => self.on_chat_info(conversation, title).await,
+                avatar,
+            } => self.on_chat_info(conversation, title, avatar).await,
             RemoteEvent::GroupEvent {
                 conversation,
                 text,
@@ -245,12 +247,21 @@ where
         &self,
         conversation: ConversationId,
         title: Option<String>,
+        avatar: Option<AttachmentSource>,
     ) -> Result<()> {
-        let Some(title) = title.filter(|title| !title.trim().is_empty()) else {
-            return Ok(());
-        };
-        self.store.set_title(&conversation, &title).await?;
-        lock(&self.cache).titles.insert(conversation, title);
+        if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+            self.store.set_title(&conversation, &title).await?;
+            lock(&self.cache).titles.insert(conversation.clone(), title);
+        }
+        if let Some(avatar) = avatar {
+            lock(&self.cache)
+                .avatars
+                .insert(conversation.clone(), avatar);
+        }
+        self.rename_if_needed(&conversation).await?;
+        if let Some(topic) = self.topic_id(&conversation).await? {
+            self.post_avatar_card(&conversation, topic).await;
+        }
         Ok(())
     }
 
@@ -474,17 +485,22 @@ where
         hint: &str,
     ) -> Result<Step<TopicId>> {
         let raw = self.title_for(conversation, hint).await?;
-        let rendered = topic_title(conversation.network, &raw);
+        let rendered = topic_title(conversation.network, conversation.kind, &raw);
         match self.sink_call(SinkOp::Create(rendered)).await {
             Step::Done(SinkOut::Topic(topic)) => {
                 let mapping = TopicMapping {
                     conversation: conversation.clone(),
                     topic,
-                    title: raw,
+                    title: raw.clone(),
                 };
                 self.store.upsert_topic(mapping.clone()).await?;
-                cache_insert(&mut lock(&self.cache), &mapping);
+                {
+                    let mut cache = lock(&self.cache);
+                    cache_insert(&mut cache, &mapping);
+                    cache.applied.insert(conversation.clone(), raw);
+                }
                 tracing::info!(conversation = %conversation, topic = topic.0, "topic created");
+                self.post_avatar_card(conversation, topic).await;
                 Ok(Step::Done(topic))
             }
             Step::Done(_) => Ok(Step::Sink(CoreError::Adapter {
@@ -577,6 +593,116 @@ where
             SinkOp::Delete { topic, tg } => {
                 self.sink.delete_message(topic, tg).await?;
                 Ok(SinkOut::Unit)
+            }
+            SinkOp::Rename { topic, title } => {
+                self.sink.rename_topic(topic, title).await?;
+                Ok(SinkOut::Unit)
+            }
+        }
+    }
+
+    async fn rename_if_needed(&self, conversation: &ConversationId) -> Result<()> {
+        let Some(topic) = self.topic_id(conversation).await? else {
+            return Ok(());
+        };
+        let desired = self.title_for(conversation, "").await?;
+        let applied = lock(&self.cache)
+            .applied
+            .get(conversation)
+            .cloned()
+            .unwrap_or_default();
+        let rendered = topic_title(conversation.network, conversation.kind, &desired);
+        let previous = topic_title(conversation.network, conversation.kind, &applied);
+        if rendered == previous {
+            return Ok(());
+        }
+        let now = self.clock.unix_secs();
+        if let Some(at) = lock(&self.cache).renamed_at.get(conversation).copied()
+            && now.saturating_sub(at) < RENAME_INTERVAL_SECS
+        {
+            return Ok(());
+        }
+        match self
+            .sink_call(SinkOp::Rename {
+                topic,
+                title: rendered,
+            })
+            .await
+        {
+            Step::Done(_) => {
+                {
+                    let mut cache = lock(&self.cache);
+                    cache.applied.insert(conversation.clone(), desired.clone());
+                    cache.renamed_at.insert(conversation.clone(), now);
+                }
+                self.store
+                    .upsert_topic(TopicMapping {
+                        conversation: conversation.clone(),
+                        topic,
+                        title: desired,
+                    })
+                    .await?;
+                Ok(())
+            }
+            Step::Sink(CoreError::Unsupported) => {
+                tracing::debug!(conversation = %conversation, "rename is unsupported");
+                Ok(())
+            }
+            Step::Sink(CoreError::TopicGone) => {
+                self.forget_topic(conversation).await?;
+                tracing::warn!(conversation = %conversation, "rename found a missing topic");
+                match self.create_topic(conversation, "").await? {
+                    Step::Done(_) => Ok(()),
+                    Step::Sink(error) => {
+                        self.record_core(Some(conversation.clone()), &error).await?;
+                        Ok(())
+                    }
+                }
+            }
+            Step::Sink(error) => {
+                self.record_core(Some(conversation.clone()), &error).await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn post_avatar_card(&self, conversation: &ConversationId, topic: TopicId) {
+        if !self.config.avatar_card {
+            return;
+        }
+        let Some(source) = lock(&self.cache).avatars.get(conversation).cloned() else {
+            return;
+        };
+        match self.store.avatar_posted(conversation).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(conversation = %conversation, %error, "avatar flag was not read");
+                return;
+            }
+        }
+        let attachment = Attachment {
+            kind: AttachmentKind::Photo,
+            mime: None,
+            size_bytes: None,
+            source,
+            file_name: Some(AVATAR_CARD_FILE.to_owned()),
+        };
+        match self
+            .sink_call(SinkOp::Media {
+                topic,
+                attachment,
+                caption: None,
+            })
+            .await
+        {
+            Step::Done(_) => {
+                if let Err(error) = self.store.mark_avatar_posted(conversation).await {
+                    tracing::warn!(conversation = %conversation, %error, "avatar flag was not stored");
+                }
+            }
+            Step::Sink(error) => {
+                tracing::warn!(conversation = %conversation, %error, "avatar card was not posted");
             }
         }
     }

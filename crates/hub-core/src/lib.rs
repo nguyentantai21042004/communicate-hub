@@ -340,6 +340,14 @@ mod tests {
     }
 
     #[test]
+    fn default_rename_is_unsupported() -> std::result::Result<(), String> {
+        let sink = FakeSink::new();
+        let result = poll(sink.rename_topic(TopicId(1), "Room".into()))?;
+        assert_eq!(result, Err(Error::Unsupported));
+        Ok(())
+    }
+
+    #[test]
     fn bridge_drives_a_fake_adapter_and_sink() -> std::result::Result<(), String> {
         let adapter = FakeAdapter::new(vec![RemoteEvent::Message(RemoteMessage {
             conversation: ConversationId {

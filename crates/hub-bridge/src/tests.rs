@@ -13,10 +13,13 @@ use hub_core::{
 };
 use tokio::sync::{oneshot, watch};
 
-use crate::limits::{SINK_MAX_ATTEMPTS, TOPIC_CONCURRENCY, TOPIC_RECREATE_LIMIT};
+use crate::limits::{
+    AVATAR_CARD_FILE, RENAME_INTERVAL_SECS, SINK_MAX_ATTEMPTS, TOPIC_CONCURRENCY,
+    TOPIC_RECREATE_LIMIT,
+};
 use crate::{
     Bridge, BridgeConfig, BridgeStore, Error, ManualClock, MemoryStore, TgMessageId, TopicId,
-    TopicIncoming,
+    TopicIncoming, TopicMapping,
 };
 
 const START_UNIX_SECS: i64 = 1_700_000_000;
@@ -37,6 +40,7 @@ enum Kind {
     Send,
     Delete,
     React,
+    Rename,
 }
 
 enum Wait {
@@ -53,6 +57,8 @@ struct Data {
     titles: Vec<(TopicId, String)>,
     texts: Vec<(TopicId, String, Option<TgMessageId>)>,
     media: Vec<(TopicId, TgMessageId, Option<String>)>,
+    media_files: Vec<Option<String>>,
+    renames: Vec<(TopicId, String)>,
     reactions: Vec<(TopicId, TgMessageId, Option<String>)>,
     deleted: Vec<(TopicId, TgMessageId)>,
     attempts: u32,
@@ -63,6 +69,7 @@ struct Data {
     create_errors_left: u32,
     send_errors_left: u32,
     delete_gone: bool,
+    rename_gone: bool,
     block: BlockMode,
     yield_latency: bool,
 }
@@ -92,6 +99,8 @@ impl FakeSink {
                     titles: Vec::new(),
                     texts: Vec::new(),
                     media: Vec::new(),
+                    media_files: Vec::new(),
+                    renames: Vec::new(),
                     reactions: Vec::new(),
                     deleted: Vec::new(),
                     attempts: 0,
@@ -102,6 +111,7 @@ impl FakeSink {
                     create_errors_left: 0,
                     send_errors_left: 0,
                     delete_gone: false,
+                    rename_gone: false,
                     block: BlockMode::Off,
                     yield_latency: false,
                 }),
@@ -142,6 +152,10 @@ impl FakeSink {
         self.lock().delete_gone = enabled;
     }
 
+    fn set_rename_gone(&self, enabled: bool) {
+        self.lock().rename_gone = enabled;
+    }
+
     fn set_block(&self, mode: BlockMode) {
         self.lock().block = mode;
     }
@@ -177,6 +191,14 @@ impl FakeSink {
 
     fn media(&self) -> Vec<(TopicId, TgMessageId, Option<String>)> {
         self.lock().media.clone()
+    }
+
+    fn media_files(&self) -> Vec<Option<String>> {
+        self.lock().media_files.clone()
+    }
+
+    fn renames(&self) -> Vec<(TopicId, String)> {
+        self.lock().renames.clone()
     }
 
     fn reactions(&self) -> Vec<(TopicId, TgMessageId, Option<String>)> {
@@ -258,6 +280,19 @@ impl FakeSink {
                 Ok(Wait::None)
             }
             Kind::React => {
+                let Some(topic) = topic else {
+                    return Err(hub_core::Error::TopicGone);
+                };
+                if !data.open.contains(&topic.0) {
+                    return Err(hub_core::Error::TopicGone);
+                }
+                Ok(Wait::None)
+            }
+            Kind::Rename => {
+                if data.rename_gone {
+                    data.rename_gone = false;
+                    return Err(hub_core::Error::TopicGone);
+                }
                 let Some(topic) = topic else {
                     return Err(hub_core::Error::TopicGone);
                 };
@@ -361,12 +396,21 @@ impl TopicSink for FakeSink {
         attachment: Attachment,
         caption: Option<String>,
     ) -> hub_core::Result<TgMessageId> {
-        let _ = attachment;
+        let file_name = attachment.file_name.clone();
         let wait = self.decide(Some(topic), &Kind::Send)?;
         self.wait(wait).await?;
         let id = self.alloc_message();
-        self.lock().media.push((topic, id, caption));
+        let mut data = self.lock();
+        data.media.push((topic, id, caption));
+        data.media_files.push(file_name);
         Ok(id)
+    }
+
+    async fn rename_topic(&self, topic: TopicId, title: String) -> hub_core::Result<()> {
+        let wait = self.decide(Some(topic), &Kind::Rename)?;
+        self.wait(wait).await?;
+        self.lock().renames.push((topic, title));
+        Ok(())
     }
 
     async fn set_reaction(
@@ -649,7 +693,7 @@ async fn a_gone_topic_is_recreated_once_and_the_send_is_retried() {
     let mapping = h.store.topic_for(&zalo_dm("a")).await.unwrap().unwrap();
     assert_eq!(mapping.topic, h.sink.titles()[1].0);
     assert_eq!(mapping.title, "An");
-    assert_eq!(h.sink.titles()[1].1, "🔵 An");
+    assert_eq!(h.sink.titles()[1].1, "🔵 👤 An");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1463,7 +1507,7 @@ async fn formatting_escapes_truncates_and_prefixes_the_topic() {
         ))
         .await
         .unwrap();
-    assert_eq!(h.sink.titles()[0].1, "🔵 Team & Co");
+    assert_eq!(h.sink.titles()[0].1, "🔵 👥 Team & Co");
     assert_eq!(
         h.sink.texts()[0].1,
         "<b>A &amp; B:</b>\n&lt;b&gt;a &amp; b&lt;/b&gt;"
@@ -1474,7 +1518,7 @@ async fn formatting_escapes_truncates_and_prefixes_the_topic() {
         .handle_remote(text_message(zalo_dm("a"), "m1", "Nhóm   giao  hàng", &long))
         .await
         .unwrap();
-    assert_eq!(h.sink.titles()[1].1, "🔵 Nhóm giao hàng");
+    assert_eq!(h.sink.titles()[1].1, "🔵 👤 Nhóm giao hàng");
     let html = &h.sink.texts()[1].1;
     assert!(html.ends_with('\u{2026}'));
     assert!(crate::format::utf16_len(html) <= hub_core::limits::TEXT_MAX_UTF16);
@@ -1511,7 +1555,7 @@ async fn formatting_escapes_truncates_and_prefixes_the_topic() {
         h.sink
             .titles()
             .iter()
-            .any(|(_, title)| title == "🔵 An Nguyen")
+            .any(|(_, title)| title == "🔵 👤 An Nguyen")
     );
     assert!(
         !h.sink
@@ -1526,6 +1570,7 @@ async fn ops_topic_receives_session_and_friend_events() {
     let h = harness_with(
         BridgeConfig {
             ops_topic: Some(TopicId(7)),
+            ..BridgeConfig::default()
         },
         Network::Zalo,
     );
@@ -1578,4 +1623,232 @@ async fn a_second_run_while_running_is_rejected() {
     assert_eq!(err, Error::AlreadyRunning);
     let _ = tx.send(());
     run.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_known_title_renames_once_inside_the_window() {
+    let h = harness();
+    h.bridge
+        .handle_remote(text_message(zalo_group("g1"), "m1", "", "hello"))
+        .await
+        .unwrap();
+    assert_eq!(h.sink.titles()[0].1, "🔵 👥 g1");
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_group("g1"),
+            title: Some("Team".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.sink.renames(),
+        vec![(h.sink.titles()[0].0, "🔵 👥 Team".into())]
+    );
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_group("g1"),
+            title: Some("Team Two".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(h.sink.renames().len(), 1);
+    h.clock.advance(RENAME_INTERVAL_SECS);
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_group("g1"),
+            title: Some("Team Two".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(h.sink.renames().len(), 2);
+    assert_eq!(
+        h.store.title(&zalo_group("g1")).await.unwrap().as_deref(),
+        Some("Team Two")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_missing_topic_on_rename_is_recreated_once() {
+    let h = harness();
+    h.bridge
+        .handle_remote(text_message(zalo_dm("a"), "m1", "An", "hello"))
+        .await
+        .unwrap();
+    h.sink.set_rename_gone(true);
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_dm("a"),
+            title: Some("An Nguyen".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(h.sink.creates(), 2);
+    assert_eq!(h.sink.renames().len(), 0);
+    assert_eq!(h.sink.titles()[1].1, "🔵 👤 An Nguyen");
+    assert!(h.store.failures().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_avatar_card_is_posted_once() {
+    let h = harness();
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_dm("a"),
+            title: Some("An".into()),
+            avatar: Some(AttachmentSource::Url("https://cdn.example/an.jpg".into())),
+        })
+        .await
+        .unwrap();
+    h.bridge
+        .handle_remote(text_message(zalo_dm("a"), "m1", "An", "hello"))
+        .await
+        .unwrap();
+    h.bridge
+        .handle_remote(text_message(zalo_dm("a"), "m2", "An", "again"))
+        .await
+        .unwrap();
+    let cards = h
+        .sink
+        .media_files()
+        .into_iter()
+        .filter(|name| name.as_deref() == Some(AVATAR_CARD_FILE))
+        .count();
+    assert_eq!(cards, 1);
+    assert!(h.store.avatar_posted(&zalo_dm("a")).await.unwrap());
+
+    let quiet = harness_with(
+        BridgeConfig {
+            avatar_card: false,
+            ..BridgeConfig::default()
+        },
+        Network::Zalo,
+    );
+    quiet
+        .bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: zalo_dm("a"),
+            title: Some("An".into()),
+            avatar: Some(AttachmentSource::Url("https://cdn.example/an.jpg".into())),
+        })
+        .await
+        .unwrap();
+    quiet
+        .bridge
+        .handle_remote(text_message(zalo_dm("a"), "m1", "An", "hello"))
+        .await
+        .unwrap();
+    assert!(quiet.sink.media_files().iter().all(|name| name.is_none()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_imported_title_is_not_renamed() {
+    let h = harness();
+    let conversation = zalo_group("g-old");
+    let topic = TopicId(40);
+    h.sink.open_topic(topic);
+    h.store
+        .upsert_topic(TopicMapping {
+            conversation: conversation.clone(),
+            topic,
+            title: "Gia Dinh".into(),
+        })
+        .await
+        .unwrap();
+    h.bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: conversation.clone(),
+            title: Some("Gia Dinh".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert!(h.sink.renames().is_empty());
+    assert_eq!(h.sink.creates(), 0);
+}
+
+struct BareSink;
+
+impl TopicSink for BareSink {
+    async fn create_topic(&self, _title: String) -> hub_core::Result<TopicId> {
+        Ok(TopicId(1))
+    }
+
+    async fn close_topic(&self, _topic: TopicId) -> hub_core::Result<()> {
+        Ok(())
+    }
+
+    async fn send_text(
+        &self,
+        _topic: TopicId,
+        _text_html: String,
+        _reply_to: Option<TgMessageId>,
+    ) -> hub_core::Result<TgMessageId> {
+        Ok(TgMessageId(1))
+    }
+
+    async fn send_media(
+        &self,
+        _topic: TopicId,
+        _attachment: Attachment,
+        _caption: Option<String>,
+    ) -> hub_core::Result<TgMessageId> {
+        Ok(TgMessageId(2))
+    }
+
+    async fn set_reaction(
+        &self,
+        _topic: TopicId,
+        _tg_message: TgMessageId,
+        _emoji: Option<String>,
+    ) -> hub_core::Result<()> {
+        Ok(())
+    }
+
+    async fn delete_message(
+        &self,
+        _topic: TopicId,
+        _tg_message: TgMessageId,
+    ) -> hub_core::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unsupported_rename_is_not_a_failure() {
+    let store = MemoryStore::new();
+    let clock = ManualClock::new(START_UNIX_SECS);
+    let adapter = FakeAdapter::new(Network::Zalo);
+    let bridge = Bridge::new(
+        BridgeConfig::default(),
+        vec![Box::new(adapter)],
+        BareSink,
+        store.clone(),
+        clock,
+    );
+    let conversation = zalo_dm("a");
+    store
+        .upsert_topic(TopicMapping {
+            conversation: conversation.clone(),
+            topic: TopicId(3),
+            title: "id".into(),
+        })
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(RemoteEvent::ChatInfo {
+            conversation: conversation.clone(),
+            title: Some("An".into()),
+            avatar: None,
+        })
+        .await
+        .unwrap();
+    assert!(store.failures().await.unwrap().is_empty());
+    assert_eq!(
+        store.title(&conversation).await.unwrap().as_deref(),
+        Some("An")
+    );
 }

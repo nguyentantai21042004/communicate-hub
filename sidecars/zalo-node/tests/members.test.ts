@@ -60,6 +60,28 @@ describe("group members", () => {
     expect(loads).toBe(2);
   });
 
+  it("drops the least recently used group past the cap", async () => {
+    const loads: string[] = [];
+    const cache = new GroupMemberCache(
+      {
+        async load(groupId) {
+          loads.push(groupId);
+          return [{ id: groupId, name: groupId }];
+        },
+      },
+      10_000,
+      () => 0,
+      2,
+    );
+    await cache.list("a");
+    await cache.list("b");
+    await cache.list("a");
+    await cache.list("c");
+    await cache.list("a");
+    await cache.list("b");
+    expect(loads).toEqual(["a", "b", "c", "b"]);
+  });
+
   it("falls back to the web api when the app session is absent", async () => {
     const web: Pick<ZaloApi, "getGroupInfo" | "getUserInfo"> = {
       async getGroupInfo() {

@@ -60,7 +60,7 @@ An unknown reply, reaction, unsend, or edit becomes a plain message. It is not a
 
 There is no edit method on `TopicSink` or `NetworkAdapter`. A known edit is a new message that replies to the mapped id. The original row stays.
 
-`ChatInfo` stores the raw title. The live topic is not renamed, because `TopicSink` has no rename. The next create uses that title. The rendered title is `{emoji} {name}`, whitespace collapsed, clipped to 128 UTF-16 units with `…`. The emoji is 🔵 for Zalo, 🟣 for Messenger, and ✈️ for Telegram. The stored title does not include the emoji, so a recreate does not prefix it twice.
+`ChatInfo` stores the raw title and, when the directory already had one, the avatar URL. The rendered title is `{network emoji} {kind mark} {name}`, whitespace collapsed, clipped to 128 UTF-16 units with `…`. The network emoji is 🔵 for Zalo, 🟣 for Messenger, and ✈️ for Telegram. The kind mark is 👤 for a person and 👥 for a group. The stored title has neither mark, so a recreate does not prefix it twice. `rename_topic` runs when that rendered title differs from the last title this process set, at most once per conversation per 24 hours (`RENAME_INTERVAL_SECS`), through the same send queue as other sink calls. A sink that returns `Unsupported` is skipped. `TopicGone` on rename drops the mapping and creates a replacement once. An avatar card is one photo, file name `avatar-card`, posted once per conversation when `avatar_card` is true. A pin failure is logged and ignored.
 
 Text posted to Telegram is HTML with `&`, `<`, and `>` escaped. Quotes are left as-is. The body is clipped to `TEXT_MAX_UTF16` with `…`. Captions are plain text, clipped to `CAPTION_MAX_UTF16`.
 

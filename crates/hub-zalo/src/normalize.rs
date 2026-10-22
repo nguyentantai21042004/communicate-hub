@@ -15,6 +15,20 @@ use crate::protocol::{
     string_field,
 };
 
+const RENAMED_TO_PREFIX: &str = "renamed to ";
+
+/// Every remote event one sidecar frame produces.
+///
+/// A message or a group rename can carry a title or an avatar ahead of the primary event.
+/// [`remote_event`] stays the primary event so a caller that wants one value is unchanged.
+pub fn remote_events(event: &SidecarEvent) -> Vec<RemoteEvent> {
+    match event.name.as_str() {
+        "message" => message_events(&event.data),
+        "group_event" => group_events(&event.data),
+        _ => remote_event(event).into_iter().collect(),
+    }
+}
+
 /// A sidecar event the adapter should surface, or `None` when the event is health-only.
 pub fn remote_event(event: &SidecarEvent) -> Option<RemoteEvent> {
     match event.name.as_str() {
@@ -26,6 +40,49 @@ pub fn remote_event(event: &SidecarEvent) -> Option<RemoteEvent> {
         "session" => session_event(&event.data),
         _ => None,
     }
+}
+
+fn message_events(data: &Value) -> Vec<RemoteEvent> {
+    let Some(message) = message_event(data) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let title = string_field(data, "conversation_title").filter(|title| !title.trim().is_empty());
+    let avatar = string_field(data, "avatar_url")
+        .filter(|url| !url.is_empty())
+        .map(AttachmentSource::Url);
+    if title.is_some() || avatar.is_some() {
+        out.push(RemoteEvent::ChatInfo {
+            conversation: message.conversation.clone(),
+            title,
+            avatar,
+        });
+    }
+    out.push(RemoteEvent::Message(message));
+    out
+}
+
+fn group_events(data: &Value) -> Vec<RemoteEvent> {
+    let Some(event) = group_event(data) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let RemoteEvent::GroupEvent {
+        conversation, text, ..
+    } = &event
+        && let Some(title) = text.strip_prefix(RENAMED_TO_PREFIX)
+    {
+        let title = title.trim();
+        if !title.is_empty() {
+            out.push(RemoteEvent::ChatInfo {
+                conversation: conversation.clone(),
+                title: Some(title.to_owned()),
+                avatar: None,
+            });
+        }
+    }
+    out.push(event);
+    out
 }
 
 fn message_event(data: &Value) -> Option<RemoteMessage> {
@@ -188,5 +245,50 @@ mod tests {
                 state: SessionState::Valid
             })
         );
+    }
+
+    #[test]
+    fn a_titled_message_emits_chat_info_before_the_message() {
+        let event = SidecarEvent {
+            name: "message".into(),
+            data: serde_json::json!({
+                "conversation": "zalo:group:g1",
+                "message_id": "m1",
+                "sender_id": "u1",
+                "text": "hi",
+                "conversation_title": "Team",
+                "avatar_url": "https://cdn.example/g1.jpg"
+            }),
+        };
+        let events = remote_events(&event);
+        assert!(matches!(
+            &events[0],
+            RemoteEvent::ChatInfo { title, avatar, .. }
+                if title.as_deref() == Some("Team")
+                    && matches!(avatar, Some(AttachmentSource::Url(url)) if url == "https://cdn.example/g1.jpg")
+        ));
+        assert!(matches!(events[1], RemoteEvent::Message(_)));
+        assert!(matches!(
+            remote_event(&event),
+            Some(RemoteEvent::Message(_))
+        ));
+    }
+
+    #[test]
+    fn a_group_rename_emits_chat_info_before_the_notice() {
+        let event = SidecarEvent {
+            name: "group_event".into(),
+            data: serde_json::json!({
+                "conversation": "zalo:group:g1",
+                "text": "renamed to Team",
+                "sent_at_unix_secs": 10
+            }),
+        };
+        let events = remote_events(&event);
+        assert!(matches!(
+            &events[0],
+            RemoteEvent::ChatInfo { title: Some(title), .. } if title == "Team"
+        ));
+        assert!(matches!(events[1], RemoteEvent::GroupEvent { .. }));
     }
 }

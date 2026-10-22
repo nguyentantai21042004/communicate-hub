@@ -228,6 +228,7 @@ pub async fn start_hub(options: RunOptions) -> Result<RunningHub> {
     let bridge = Bridge::new(
         BridgeConfig {
             ops_topic: config.ops_topic_id.map(TopicId),
+            avatar_card: config.avatar_card,
         },
         vec![Box::new(gate)],
         bot.clone(),

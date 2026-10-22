@@ -3,6 +3,7 @@
 //! Outgoing calls become sidecar methods. Sidecar events become [`hub_core::RemoteEvent`].
 //! A `Url` attachment is rejected: the sidecar uploads a local file.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use hub_core::{
@@ -14,13 +15,14 @@ use tokio::sync::{broadcast, watch};
 
 use crate::ZaloAdmin;
 use crate::error::Error;
-use crate::normalize::remote_event;
+use crate::normalize::remote_events;
 use crate::protocol::{SidecarEvent, map_rpc, message_id_of};
 use crate::sidecar::{RunPhase, Sidecar, SidecarConfig};
 
 struct Inbox {
     events: broadcast::Receiver<SidecarEvent>,
     phase: watch::Receiver<RunPhase>,
+    pending: VecDeque<RemoteEvent>,
 }
 
 /// Source adapter for Zalo. Clone is not implemented; share it behind `Arc` at the call site.
@@ -51,6 +53,7 @@ impl ZaloAdapter {
             inbox: tokio::sync::Mutex::new(Inbox {
                 events: sidecar.subscribe(),
                 phase: sidecar.watch_phase(),
+                pending: VecDeque::new(),
             }),
         }
     }
@@ -62,25 +65,35 @@ impl ZaloAdapter {
 
     async fn next_remote(&self) -> hub_core::Result<Option<RemoteEvent>> {
         let mut inbox = self.inbox.lock().await;
-        let Inbox { events, phase } = &mut *inbox;
         loop {
-            match events.try_recv() {
+            if let Some(remote) = inbox.pending.pop_front() {
+                return Ok(Some(remote));
+            }
+            match inbox.events.try_recv() {
                 Ok(event) => {
-                    if let Some(remote) = remote_event(&event) {
+                    if let Some(remote) = enqueue(&mut inbox.pending, &event) {
                         return Ok(Some(remote));
                     }
                 }
                 Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Closed) => return idle(*phase.borrow()),
+                Err(broadcast::error::TryRecvError::Closed) => {
+                    return idle(*inbox.phase.borrow());
+                }
                 Err(broadcast::error::TryRecvError::Empty) => {
-                    if let Some(done) = terminal(*phase.borrow()) {
+                    if let Some(done) = terminal(*inbox.phase.borrow()) {
                         return done;
                     }
+                    // Split the fields so the two waits do not borrow `inbox` twice.
+                    let Inbox {
+                        events,
+                        phase,
+                        pending,
+                    } = &mut *inbox;
                     tokio::select! {
                         event = events.recv() => {
                             match event {
                                 Ok(event) => {
-                                    if let Some(remote) = remote_event(&event) {
+                                    if let Some(remote) = enqueue(pending, &event) {
                                         return Ok(Some(remote));
                                     }
                                 }
@@ -100,6 +113,13 @@ impl ZaloAdapter {
             }
         }
     }
+}
+
+fn enqueue(pending: &mut VecDeque<RemoteEvent>, event: &SidecarEvent) -> Option<RemoteEvent> {
+    let mut remotes = VecDeque::from(remote_events(event));
+    let first = remotes.pop_front()?;
+    pending.append(&mut remotes);
+    Some(first)
 }
 
 impl NetworkAdapter for ZaloAdapter {

@@ -17,6 +17,7 @@ export class ZaloDirectory {
     return friends.map((friend) => ({
       id: friend.userId,
       name: friend.alias?.trim() || friend.displayName || friend.zaloName || friend.userId,
+      avatar_url: friend.avatar || friend.bgavatar,
     }));
   }
 
@@ -26,10 +27,14 @@ export class ZaloDirectory {
     const ids = Object.keys(all.gridVerMap ?? {});
     if (ids.length === 0) return [];
     const info = await api.getGroupInfo(ids);
-    return ids.map((id) => ({
-      id,
-      name: info.gridInfoMap?.[id]?.name?.trim() || id,
-    }));
+    return ids.map((id) => {
+      const record = info.gridInfoMap?.[id];
+      return {
+        id,
+        name: record?.name?.trim() || id,
+        avatar_url: record?.avt || record?.fullAvt,
+      };
+    });
   }
 
   async listFriendRequests(): Promise<FriendRequestEntry[]> {

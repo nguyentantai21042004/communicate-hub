@@ -1146,3 +1146,150 @@ async fn token_never_appears_in_debug_or_errors() {
     assert!(!format!("{rejected} {rejected:?}").contains(TOKEN));
     assert!(matches!(rejected, Error::Permanent { status: None }));
 }
+
+fn sticker_list() -> String {
+    envelope::<Vec<frankenstein::stickers::Sticker>>(
+        r#"[{"file_id":"f","file_unique_id":"u","type":"custom_emoji","width":100,"height":100,"is_animated":false,"is_video":false,"emoji":"👤","custom_emoji_id":"emoji-person"},{"file_id":"g","file_unique_id":"v","type":"custom_emoji","width":100,"height":100,"is_animated":false,"is_video":false,"emoji":"👥","custom_emoji_id":"emoji-group"}]"#,
+    )
+}
+
+#[tokio::test]
+async fn topic_sink_uses_one_sticker_list_for_the_process() {
+    let fake = Fake::bind(|hit| {
+        let body = match hit.method() {
+            "getForumTopicIconStickers" => sticker_list(),
+            "createForumTopic" => ok_topic(),
+            _ => ok_message(50),
+        };
+        Reply::json(200, body)
+    })
+    .await;
+    let client = test_client(&fake.base);
+    TopicSink::create_topic(&client, "🔵 👤 An".into())
+        .await
+        .unwrap();
+    TopicSink::create_topic(&client, "🔵 👥 Team".into())
+        .await
+        .unwrap();
+    let hits = fake.hits().await;
+    assert_eq!(
+        hits.iter()
+            .filter(|hit| hit.method() == "getForumTopicIconStickers")
+            .count(),
+        1
+    );
+    let person = json_body(&hits[1]);
+    assert_eq!(person["icon_custom_emoji_id"], "emoji-person");
+    assert!(person.get("icon_color").is_none());
+    let group = json_body(&hits[2]);
+    assert_eq!(group["icon_custom_emoji_id"], "emoji-group");
+    assert!(group.get("icon_color").is_none());
+}
+
+#[tokio::test]
+async fn topic_sink_falls_back_to_icon_color() {
+    let fake = Fake::bind(reply_for).await;
+    let client = test_client(&fake.base);
+    TopicSink::create_topic(&client, "🔵 👤 An".into())
+        .await
+        .unwrap();
+    TopicSink::create_topic(&client, "🔵 👥 Team".into())
+        .await
+        .unwrap();
+    let hits = fake.hits().await;
+    assert_eq!(
+        hits.iter()
+            .filter(|hit| hit.method() == "getForumTopicIconStickers")
+            .count(),
+        1
+    );
+    let person = json_body(
+        hits.iter()
+            .find(|hit| hit.method() == "createForumTopic")
+            .unwrap(),
+    );
+    assert_eq!(person["icon_color"], limits::ICON_COLOR_BLUE);
+    assert!(person.get("icon_custom_emoji_id").is_none());
+    let group = json_body(
+        hits.iter()
+            .rev()
+            .find(|hit| hit.method() == "createForumTopic")
+            .unwrap(),
+    );
+    assert_eq!(group["icon_color"], limits::ICON_COLOR_GREEN);
+}
+
+#[tokio::test]
+async fn rename_edits_the_forum_topic() {
+    let fake = Fake::bind(|hit| {
+        let body = if hit.method() == "editForumTopic" {
+            ok_bool()
+        } else {
+            ok_message(50)
+        };
+        Reply::json(200, body)
+    })
+    .await;
+    let client = test_client(&fake.base);
+    TopicSink::rename_topic(&client, TopicId(THREAD), "🔵 👥 Team".into())
+        .await
+        .unwrap();
+    let hits = fake.hits().await;
+    assert_json(&hits[0], "editForumTopic");
+    let body = json_body(&hits[0]);
+    assert_eq!(body["message_thread_id"], THREAD);
+    assert_eq!(body["name"], "🔵 👥 Team");
+    assert_eq!(body["chat_id"], GROUP_ID);
+}
+
+#[tokio::test]
+async fn an_avatar_card_is_pinned_and_a_pin_error_is_ignored() {
+    let fake = Fake::bind(|hit| {
+        let body = match hit.method() {
+            "pinChatMessage" => ok_bool(),
+            _ => ok_message(50),
+        };
+        Reply::json(200, body)
+    })
+    .await;
+    let client = test_client(&fake.base);
+    let mut photo = url_file(AttachmentKind::Photo, "https://cdn.example/a.jpg");
+    client
+        .send_media(TopicId(THREAD), photo.clone(), None)
+        .await
+        .unwrap();
+    photo.file_name = Some(limits::AVATAR_CARD_FILE.to_owned());
+    let id = client
+        .send_media(TopicId(THREAD), photo, None)
+        .await
+        .unwrap();
+    assert_eq!(id, TgMessageId(50));
+    let hits = fake.hits().await;
+    assert_eq!(
+        hits.iter()
+            .filter(|hit| hit.method() == "pinChatMessage")
+            .count(),
+        1
+    );
+    let pin = json_body(
+        hits.iter()
+            .find(|hit| hit.method() == "pinChatMessage")
+            .unwrap(),
+    );
+    assert_eq!(pin["message_id"], 50);
+    assert_eq!(pin["disable_notification"], true);
+
+    let failing = Fake::bind(|hit| match hit.method() {
+        "pinChatMessage" => Reply::json(400, api_error(400, "not enough rights", None)),
+        _ => Reply::json(200, ok_message(77)),
+    })
+    .await;
+    let client = test_client(&failing.base);
+    let mut photo = url_file(AttachmentKind::Photo, "https://cdn.example/a.jpg");
+    photo.file_name = Some(limits::AVATAR_CARD_FILE.to_owned());
+    let id = client
+        .send_media(TopicId(THREAD), photo, None)
+        .await
+        .unwrap();
+    assert_eq!(id, TgMessageId(77));
+}

@@ -34,6 +34,8 @@ pub struct HubConfig {
     pub event_retention_days: i64,
     /// Days of downloaded Zalo media to keep.
     pub media_retention_days: i64,
+    /// Pin one avatar photo the first time a topic is created.
+    pub avatar_card: bool,
 }
 
 impl HubConfig {
@@ -80,11 +82,8 @@ impl HubConfig {
             None => None,
         };
         let admin_user_ids = int_array(table, "admin_user_ids")?;
-        let skip_muted_zalo_groups = match table.get("skip_muted_zalo_groups") {
-            None => false,
-            Some(toml::Value::Boolean(value)) => *value,
-            Some(_) => bail!("hub.toml: skip_muted_zalo_groups must be true or false"),
-        };
+        let skip_muted_zalo_groups = bool_field(table, "skip_muted_zalo_groups", false)?;
+        let avatar_card = bool_field(table, "avatar_card", true)?;
         let sidecar_program = match table.get("sidecar_program") {
             None => DEFAULT_PROGRAM.to_owned(),
             Some(toml::Value::String(value)) if !value.is_empty() => value.clone(),
@@ -121,7 +120,20 @@ impl HubConfig {
                 "media_retention_days",
                 DEFAULT_MEDIA_RETENTION_DAYS,
             )?,
+            avatar_card,
         })
+    }
+}
+
+fn bool_field(
+    table: &toml::map::Map<String, toml::Value>,
+    field: &str,
+    default: bool,
+) -> Result<bool> {
+    match table.get(field) {
+        None => Ok(default),
+        Some(toml::Value::Boolean(value)) => Ok(*value),
+        Some(_) => bail!("hub.toml: {field} must be true or false"),
     }
 }
 
@@ -250,5 +262,11 @@ mod tests {
         assert_eq!(config.media_retention_days, 7);
         assert_eq!(config.admin_user_ids, vec![7]);
         assert_eq!(config.ops_topic_id, None);
+        assert!(config.avatar_card);
+        let off = HubConfig::parse(
+            "group_id = -100123\nsidecar_args = [\"fixture.js\"]\navatar_card = false\n",
+        )
+        .unwrap();
+        assert!(!off.avatar_card);
     }
 }

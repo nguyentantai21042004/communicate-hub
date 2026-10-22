@@ -10,6 +10,7 @@ use hub_core::{ConversationId, MessageRef, TgMessageId, TopicId};
 use hub_store::{NewFailure, SharedHub, StoredFailure, StoredTopic};
 
 use crate::error::{Error, Result};
+use crate::limits::AVATAR_CARD_SETTING_PREFIX;
 use crate::mention::normalize_name;
 use crate::store::{BridgeStore, FailureRecord, TopicMapping, scope};
 
@@ -276,6 +277,29 @@ impl BridgeStore for SqliteStore {
         let hub = self.hub.clone();
         call(hub, move |hub| hub.retries_since(since_unix_secs)).await
     }
+
+    async fn avatar_posted(&self, conversation: &ConversationId) -> Result<bool> {
+        let key = avatar_key(conversation);
+        let hub = self.hub.clone();
+        call(hub, move |hub| {
+            Ok(hub.setting(&key)?.as_deref() == Some("1"))
+        })
+        .await
+    }
+
+    async fn mark_avatar_posted(&self, conversation: &ConversationId) -> Result<()> {
+        let key = avatar_key(conversation);
+        let hub = self.hub.clone();
+        call(hub, move |hub| {
+            hub.set_setting(&key, "1")?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+fn avatar_key(conversation: &ConversationId) -> String {
+    format!("{AVATAR_CARD_SETTING_PREFIX}{conversation}")
 }
 
 fn mapping_from(row: StoredTopic) -> hub_store::Result<TopicMapping> {

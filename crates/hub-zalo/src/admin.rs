@@ -17,6 +17,9 @@ pub struct DirectoryEntry {
     pub id: String,
     /// Display name. A friend alias wins over the Zalo name.
     pub name: String,
+    /// Avatar URL already present on the directory list. Absent when Zalo sent none.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 /// One pending friend request.

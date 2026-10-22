@@ -36,6 +36,8 @@ export interface MessageEventData {
   sent_at_unix_secs: number;
   mentions: Array<{ user_id: string; display_name: string }>;
   from_self: boolean;
+  conversation_title?: string;
+  avatar_url?: string;
 }
 
 export interface NormalizeDeps {

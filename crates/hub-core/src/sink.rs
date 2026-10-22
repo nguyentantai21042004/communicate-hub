@@ -86,4 +86,26 @@ pub trait TopicSink: Send + Sync {
         topic: TopicId,
         tg_message: TgMessageId,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Renames a forum topic.
+    ///
+    /// The default returns [`crate::Error::Unsupported`] so an implementor that has no
+    /// rename keeps compiling. `hub-tgbot` overrides it with `editForumTopic`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Unsupported`] when the implementor has no rename.
+    /// Returns [`crate::Error::TopicGone`] when `topic` does not exist.
+    /// Returns [`crate::Error::RateLimited`] when Telegram asks the caller to wait.
+    /// Returns [`crate::Error::Adapter`] for any other failure.
+    fn rename_topic(
+        &self,
+        topic: TopicId,
+        title: String,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            let _ = (topic, title);
+            Err(crate::Error::Unsupported)
+        }
+    }
 }

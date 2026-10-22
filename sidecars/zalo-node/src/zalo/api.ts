@@ -30,6 +30,8 @@ export interface ZaloFriend {
   displayName?: string;
   zaloName?: string;
   alias?: string;
+  avatar?: string;
+  bgavatar?: string;
 }
 
 export interface ZaloUserSearchResult {
@@ -56,6 +58,7 @@ export interface GroupMemberRecord {
 export interface GroupInfoRecord {
   name?: string;
   avt?: string;
+  fullAvt?: string;
   memVerList?: string[];
   currentMems?: GroupMemberRecord[];
   totalMember?: number;

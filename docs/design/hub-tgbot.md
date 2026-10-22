@@ -8,9 +8,11 @@ Tests bind a fake on `127.0.0.1`. [`BotConfig::api_base_url`](../../crates/hub-t
 
 ## What the bridge can call
 
-`TopicSink`: `create_topic`, `close_topic`, `send_text` (HTML, passed through), `send_media`, `set_reaction` (`None` clears), `delete_message`.
+`TopicSink`: `create_topic`, `close_topic`, `send_text` (HTML, passed through), `send_media`, `set_reaction` (`None` clears), `delete_message`, `rename_topic` (`editForumTopic`). The trait's default `rename_topic` returns `Unsupported`. This client overrides it.
 
-On `BotClient` only, because the trait has no slot for them: `create_topic_with` (one of the six `icon_color` values, optional custom emoji), `reopen_topic`, `edit_message_text`, `send_media_group`, `preflight`, `run_updates`.
+`TopicSink::create_topic` loads `getForumTopicIconStickers` once per process. The second title token `👥` selects the group icon and anything else selects the person icon. The preference lists are 👤 🙂 💙 and 👥 💬 🟢. A match uses `icon_custom_emoji_id` and no color. A miss, or a failed fetch, uses blue for a person and green for a group. The inherent `create_topic` still sends no icon.
+
+On `BotClient` only: `create_topic_with` (one of the six `icon_color` values, optional custom emoji), `edit_forum_topic`, `pin_message`, `reopen_topic`, `edit_message_text`, `send_media_group`, `preflight`, `run_updates`. A photo whose `file_name` is `avatar-card` is pinned with notifications off. A pin failure is logged and the message id is still returned.
 
 `send_media` picks the method from `AttachmentKind`: photo, video, audio, voice, document, animation. A static sticker is sent with `sendPhoto`. An animated sticker (`application/x-tgsticker`, `.tgs`) or a video sticker (`video/webm`, `.webm`) is sent with `sendDocument`. This crate does not call `sendSticker`. The older `chat-bridges` sender calls `sendSticker` and falls back to a document. The task for this crate is the photo/document split.
 

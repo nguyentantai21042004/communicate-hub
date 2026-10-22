@@ -9,7 +9,8 @@ import type {
   ZaloUndoEvent,
 } from "./api.js";
 import { ZaloDirectory } from "./directory.js";
-import { parseConversation, realId } from "./ids.js";
+import { DIRECTORY_TTL_MS, DirectoryBook } from "./directory-book.js";
+import { parseConversation, realId, ZALO_THREAD_GROUP } from "./ids.js";
 import type { DirectoryEntry } from "./members.js";
 import {
   normalizeFriendRequest,
@@ -17,6 +18,7 @@ import {
   normalizeReaction,
   normalizeUndo,
   normalizeZaloMessage,
+  type MessageEventData,
   type NormalizeDeps,
 } from "./normalize.js";
 import { zaloIconForEmoji } from "./reaction.js";
@@ -97,9 +99,11 @@ export class ZaloBridge {
   private readonly names = new Map<string, string>();
   private qrRun = 0;
   private readonly directory: ZaloDirectory;
+  private readonly book: DirectoryBook;
 
   constructor(private readonly deps: BridgeDeps) {
     this.directory = new ZaloDirectory(deps.session);
+    this.book = new DirectoryBook(this.directory, DIRECTORY_TTL_MS, deps.now);
   }
 
   async start(): Promise<void> {
@@ -337,6 +341,7 @@ export class ZaloBridge {
       this.onDisconnected(code);
     }) as never);
     listener.start();
+    this.book.warm();
     this.reconnectDelayMs = RECONNECT_DELAY_MS;
     this.listenerUp = true;
     this.deps.emit("listener", { state: "up", reason: "started" });
@@ -349,6 +354,7 @@ export class ZaloBridge {
     const message = await normalizeZaloMessage(raw, this.normalizeDeps());
     if (!message) return;
     if (this.consumeEcho(message.message_id, message.cli_msg_id)) return;
+    await this.annotate(message);
     this.deps.emit("message", message);
   }
 
@@ -441,6 +447,44 @@ export class ZaloBridge {
 
   private contactName(uid: string): string | undefined {
     return this.deps.normalize?.contactName?.(uid) ?? this.names.get(uid);
+  }
+
+  private async annotate(message: MessageEventData): Promise<void> {
+    const parsed = parseConversation(message.conversation);
+    if (!parsed) return;
+    const kind = parsed.threadType === ZALO_THREAD_GROUP ? "group" : "dm";
+    const hit = await this.book.lookup(kind, parsed.threadId);
+    if (hit) {
+      const title = hit.name.trim();
+      if (title && title !== parsed.threadId) message.conversation_title = title;
+      if (hit.avatar_url) message.avatar_url = hit.avatar_url;
+      if (kind === "dm" && title && title !== parsed.threadId) this.names.set(parsed.threadId, title);
+    }
+    if (kind !== "group") return;
+    const senderMissing =
+      !message.sender_display_name || message.sender_display_name === message.sender_id;
+    const mentionMissing = message.mentions.some(
+      (mention) => !mention.display_name || mention.display_name === mention.user_id,
+    );
+    if (!senderMissing && !mentionMissing) return;
+    let members: DirectoryEntry[];
+    try {
+      members = await this.deps.members.list(parsed.threadId);
+    } catch {
+      return;
+    }
+    for (const member of members) {
+      if (member.name && member.name !== member.id) this.names.set(member.id, member.name);
+    }
+    if (senderMissing) {
+      const named = this.contactName(message.sender_id);
+      if (named && named !== message.sender_id) message.sender_display_name = named;
+    }
+    for (const mention of message.mentions) {
+      if (mention.display_name && mention.display_name !== mention.user_id) continue;
+      const named = this.contactName(mention.user_id);
+      if (named && named !== mention.user_id) mention.display_name = named;
+    }
   }
 
   private rememberQuote(raw: ZaloWireMessage): void {

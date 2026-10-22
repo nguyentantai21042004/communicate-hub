@@ -82,11 +82,13 @@ Frames stay at or under 8 MiB. A longer line is discarded through the next newli
 
 `send.unsend` takes `conversation`, `message_id`, and optional `cli_msg_id`. It returns `{}`.
 
-`directory.friends` takes `{}` and returns `friends`, a list of `{id, name}`. A local alias wins over the Zalo display name.
+`directory.friends` takes `{}` and returns `friends`, a list of `{id, name, avatar_url?}`. A local alias wins over the Zalo display name. `avatar_url` is the friend's `avatar`, or `bgavatar` when that is the one Zalo sent. The listener fetches this list once at start and then at most once per 24 hours, plus one extra fetch when an event names an unknown id. There is no timer. A `rate_limited` error backs off and does not retry in a loop.
 
-`directory.groups` takes `{}` and returns `groups`, a list of `{id, name}`.
+`directory.groups` takes `{}` and returns `groups`, a list of `{id, name, avatar_url?}`. `avatar_url` is `avt` or `fullAvt`. It is fetched in the same pass as friends, after friends, so a rate limit on friends does not also call groups.
 
-`directory.group_members` takes `group_id` and returns `members`, a list of `{id, name}`. Names are cached for 5 minutes. The cache prefers `currentMems` on the group info. Missing names are filled from the PC app profile API when `app-session.json` sits next to the credentials file and is mode `0600`. Otherwise the web `getGroupInfo` and `getUserInfo` calls are the fallback. The PC app login flow that creates `app-session.json` is not a method here.
+`directory.group_members` takes `group_id` and returns `members`, a list of `{id, name}`. Names are cached for 5 minutes, and the cache keeps at most 64 groups. A message loads the list only when the sender or a mention has no display name. The cache prefers `currentMems` on the group info. Missing names are filled from the PC app profile API when `app-session.json` sits next to the credentials file and is mode `0600`. Otherwise the web `getGroupInfo` and `getUserInfo` calls are the fallback. The PC app login flow that creates `app-session.json` is not a method here.
+
+A `message` event may include `conversation_title` and `avatar_url` from that cache. A name that is empty or equal to the id is omitted, so the hub does not treat the id as a resolved title. The avatar URL is still sent.
 
 `friend.requests` takes `{}` and returns `requests`, a list of `{id, name, message?}`. The web recommendations endpoint is the list Zalo's own app reads.
 

@@ -3,7 +3,7 @@
 //! Text and captions are measured in UTF-16 code units, which is how Telegram counts. Topic
 //! titles use the same unit because the Bot API caps `createForumTopic` at 128 of them.
 
-use hub_core::{Mention, Network, limits};
+use hub_core::{ConversationKind, Mention, Network, limits};
 
 use crate::limits::{
     DEFAULT_SENDER_NAME, FALLBACK_TOPIC_NAME, SENDER_NAME_MAX_CHARS, TOPIC_TITLE_MAX_CHARS,
@@ -13,6 +13,8 @@ const ELLIPSIS: char = '\u{2026}';
 const ZALO_TOPIC_PREFIX: &str = "\u{1F535}"; // 🔵
 const MESSENGER_TOPIC_PREFIX: &str = "\u{1F7E3}"; // 🟣
 const TELEGRAM_TOPIC_PREFIX: &str = "\u{2708}\u{FE0F}"; // ✈️
+const PERSON_MARK: &str = "\u{1F464}"; // 👤 hub-tgbot matches this scalar
+const GROUP_MARK: &str = "\u{1F465}"; // 👥 hub-tgbot matches this scalar
 
 /// Escapes `&`, `<`, and `>` for Telegram HTML.
 ///
@@ -64,16 +66,24 @@ pub(crate) fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Forum topic title: an emoji for the network, then the conversation name.
-pub(crate) fn topic_title(network: Network, display_name: &str) -> String {
+/// Forum topic title: a network emoji, a person or group mark, then the name.
+pub(crate) fn topic_title(network: Network, kind: ConversationKind, display_name: &str) -> String {
     let prefix = network_prefix(network);
+    let mark = kind_mark(kind);
     let compact = collapse_whitespace(display_name);
     let body = if compact.is_empty() {
         FALLBACK_TOPIC_NAME
     } else {
         compact.as_str()
     };
-    truncate_utf16(&format!("{prefix} {body}"), TOPIC_TITLE_MAX_CHARS)
+    truncate_utf16(&format!("{prefix} {mark} {body}"), TOPIC_TITLE_MAX_CHARS)
+}
+
+fn kind_mark(kind: ConversationKind) -> &'static str {
+    match kind {
+        ConversationKind::Dm => PERSON_MARK,
+        ConversationKind::Group => GROUP_MARK,
+    }
 }
 
 /// Emoji that prefixes a topic title for `network`.
@@ -180,6 +190,8 @@ fn emphasize_mentions(body: &str, mentions: &[Mention], budget: usize) -> String
 
 #[cfg(test)]
 mod tests {
+    use hub_core::ConversationKind;
+
     use super::*;
 
     #[test]
@@ -208,18 +220,29 @@ mod tests {
     #[test]
     fn topic_title_prefixes_the_network_and_clips() {
         assert_eq!(
-            topic_title(Network::Zalo, "Nhóm giao hàng"),
-            "🔵 Nhóm giao hàng"
+            topic_title(Network::Zalo, ConversationKind::Group, "Nhóm giao hàng"),
+            "🔵 👥 Nhóm giao hàng"
         );
-        assert_eq!(topic_title(Network::Messenger, "Tuấn"), "🟣 Tuấn");
-        assert!(topic_title(Network::Telegram, "ops").starts_with("✈️"));
-        assert_eq!(topic_title(Network::Zalo, "   "), "🔵 chat");
-        let long = topic_title(Network::Zalo, &"y".repeat(200));
+        assert_eq!(
+            topic_title(Network::Messenger, ConversationKind::Dm, "Tuấn"),
+            "🟣 👤 Tuấn"
+        );
+        assert!(topic_title(Network::Telegram, ConversationKind::Group, "ops").starts_with("✈️"));
+        assert!(topic_title(Network::Telegram, ConversationKind::Group, "ops").contains("👥"));
+        assert_eq!(
+            topic_title(Network::Zalo, ConversationKind::Dm, "   "),
+            "🔵 👤 chat"
+        );
+        let long = topic_title(Network::Zalo, ConversationKind::Dm, &"y".repeat(200));
         assert!(utf16_len(&long) <= TOPIC_TITLE_MAX_CHARS);
         assert!(long.ends_with('\u{2026}'));
         assert_eq!(
-            topic_title(Network::Zalo, "  Nhóm   giao  hàng "),
-            "🔵 Nhóm giao hàng"
+            topic_title(
+                Network::Zalo,
+                ConversationKind::Group,
+                "  Nhóm   giao  hàng "
+            ),
+            "🔵 👥 Nhóm giao hàng"
         );
     }
 

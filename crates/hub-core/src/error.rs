@@ -1,8 +1,8 @@
 //! The one error type for hub-core.
 //!
 //! Adapters map transport failures into [`Error::Adapter`] at the crate boundary.
-//! Parse failures and the two Telegram outcomes the bridge matches
-//! ([`Error::RateLimited`], [`Error::TopicGone`]) are their own variants.
+//! Parse failures and the Telegram outcomes the bridge matches
+//! ([`Error::RateLimited`], [`Error::TopicGone`], [`Error::Unsupported`]) are their own variants.
 
 /// Failure from parsing a hub id, or from a [`crate::NetworkAdapter`] or [`crate::TopicSink`] call.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -37,6 +37,12 @@ pub enum Error {
     /// a replacement topic.
     #[error("topic is gone")]
     TopicGone,
+    /// The sink does not implement this call.
+    ///
+    /// A provided [`crate::TopicSink`] method returns this when an implementor has not
+    /// overridden it. Callers skip the call. It is not a delivery failure.
+    #[error("unsupported")]
+    Unsupported,
     /// The adapter failed for a reason the bridge cannot recover by itself.
     ///
     /// SECURITY: `detail` is logged. Put an id or a status in it, never message text or a token.

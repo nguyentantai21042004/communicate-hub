@@ -3,11 +3,14 @@ import type { GroupInfoRecord, UserProfiles, ZaloApi } from "./api.js";
 
 /** How long a group member list is reused before the next lookup. */
 export const GROUP_MEMBER_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Groups kept in the member cache. The least recently used list is dropped past this. */
+export const GROUP_MEMBER_CACHE_MAX = 64;
 const USER_INFO_BATCH = 50;
 
 export interface DirectoryEntry {
   id: string;
   name: string;
+  avatar_url?: string;
 }
 
 export interface MemberSource {
@@ -21,13 +24,24 @@ export class GroupMemberCache {
     private readonly source: MemberSource,
     private readonly ttlMs: number,
     private readonly now: () => number,
+    private readonly maxEntries = GROUP_MEMBER_CACHE_MAX,
   ) {}
 
   async list(groupId: string): Promise<DirectoryEntry[]> {
     const hit = this.entries.get(groupId);
-    if (hit && this.now() - hit.at < this.ttlMs) return hit.members;
+    if (hit && this.now() - hit.at < this.ttlMs) {
+      this.entries.delete(groupId);
+      this.entries.set(groupId, hit);
+      return hit.members;
+    }
     const members = await this.source.load(groupId);
+    this.entries.delete(groupId);
     this.entries.set(groupId, { at: this.now(), members });
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
     return members;
   }
 }

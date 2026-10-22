@@ -10,7 +10,9 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hub_core::{ConversationId, ModuleHealth, ModuleState, RemoteEvent, TgMessageId, TopicId};
+use hub_core::{
+    AttachmentSource, ConversationId, ModuleHealth, ModuleState, RemoteEvent, TgMessageId, TopicId,
+};
 use tokio::sync::{oneshot, watch};
 
 use crate::adapter::AdapterHandle;
@@ -31,6 +33,9 @@ pub(crate) struct Cache {
     topics: HashMap<ConversationId, TopicId>,
     conversations: HashMap<TopicId, ConversationId>,
     titles: HashMap<ConversationId, String>,
+    applied: HashMap<ConversationId, String>,
+    renamed_at: HashMap<ConversationId, i64>,
+    avatars: HashMap<ConversationId, AttachmentSource>,
 }
 
 impl Cache {
@@ -39,6 +44,9 @@ impl Cache {
             topics: HashMap::new(),
             conversations: HashMap::new(),
             titles: HashMap::new(),
+            applied: HashMap::new(),
+            renamed_at: HashMap::new(),
+            avatars: HashMap::new(),
         }
     }
 }
@@ -81,6 +89,10 @@ pub(crate) enum SinkOp {
     Delete {
         topic: TopicId,
         tg: TgMessageId,
+    },
+    Rename {
+        topic: TopicId,
+        title: String,
     },
 }
 
@@ -512,6 +524,7 @@ where
                 format!("rate limited, retry after {retry_after_secs}s"),
             ),
             hub_core::Error::TopicGone => (false, "topic is gone".to_owned()),
+            hub_core::Error::Unsupported => (false, "unsupported".to_owned()),
             hub_core::Error::Adapter { detail } => (true, format!("adapter failed: {detail}")),
             other => (false, other.to_string()),
         };
@@ -529,9 +542,15 @@ where
 }
 
 fn cache_insert(cache: &mut Cache, mapping: &TopicMapping) {
+    // A title learned in this process wins over the row we are restoring.
     cache
         .titles
-        .insert(mapping.conversation.clone(), mapping.title.clone());
+        .entry(mapping.conversation.clone())
+        .or_insert_with(|| mapping.title.clone());
+    cache
+        .applied
+        .entry(mapping.conversation.clone())
+        .or_insert_with(|| mapping.title.clone());
     cache
         .conversations
         .insert(mapping.topic, mapping.conversation.clone());

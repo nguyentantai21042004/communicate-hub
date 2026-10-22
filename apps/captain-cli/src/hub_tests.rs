@@ -603,3 +603,15 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     out
 }
+
+#[test]
+fn hub_idle_loop_adds_no_interval() {
+    let idle = include_str!("hub_run.rs")
+        .matches("tokio::time::interval(")
+        .count();
+    assert_eq!(idle, 3);
+    let book = include_str!("../../../sidecars/zalo-node/src/zalo/directory-book.ts");
+    assert!(!book.contains("setInterval"));
+    let adapter = include_str!("../../../sidecars/zalo-node/src/zalo/adapter.ts");
+    assert!(!adapter.contains("setInterval"));
+}

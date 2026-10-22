@@ -6,6 +6,7 @@
 //! The trait methods map those into [`hub_core::Error::Adapter`].
 
 use std::future::Future;
+use std::sync::Arc;
 
 use frankenstein::AsyncTelegramApi;
 use frankenstein::ParseMode;
@@ -13,12 +14,14 @@ use frankenstein::client_reqwest::Bot as ApiBot;
 use frankenstein::input_file::FileUpload;
 use frankenstein::input_media::{InputMediaPhoto, MediaGroupInputMedia};
 use frankenstein::methods::{
-    CloseForumTopicParams, CreateForumTopicParams, DeleteMessageParams, EditMessageTextParams,
-    GetChatMemberParams, GetChatParams, GetUpdatesParams, ReopenForumTopicParams,
-    SendAnimationParams, SendAudioParams, SendDocumentParams, SendMediaGroupParams,
-    SendMessageParams, SendPhotoParams, SendVideoParams, SendVoiceParams, SetMessageReactionParams,
+    CloseForumTopicParams, CreateForumTopicParams, DeleteMessageParams, EditForumTopicParams,
+    EditMessageTextParams, GetChatMemberParams, GetChatParams, GetUpdatesParams,
+    PinChatMessageParams, ReopenForumTopicParams, SendAnimationParams, SendAudioParams,
+    SendDocumentParams, SendMediaGroupParams, SendMessageParams, SendPhotoParams, SendVideoParams,
+    SendVoiceParams, SetMessageReactionParams,
 };
 use frankenstein::response::{MessageOrBool, MethodResponse};
+use frankenstein::stickers::Sticker;
 use frankenstein::types::{
     AllowedUpdate, ChatFullInfo, ChatMember, Message, ReactionType, ReactionTypeEmoji,
     ReplyParameters, User,
@@ -87,6 +90,62 @@ pub struct BotClient {
     group_id: i64,
     token: crate::config::BotToken,
     queue: RequestQueue,
+    icons: Arc<tokio::sync::Mutex<Option<IconSet>>>,
+}
+
+#[derive(Clone)]
+struct IconSet {
+    person: TopicOptions,
+    group: TopicOptions,
+}
+
+impl IconSet {
+    fn colors_only() -> Self {
+        Self {
+            person: TopicOptions {
+                icon_color: Some(TopicIconColor::Blue),
+                icon_custom_emoji_id: None,
+            },
+            group: TopicOptions {
+                icon_color: Some(TopicIconColor::Green),
+                icon_custom_emoji_id: None,
+            },
+        }
+    }
+
+    fn from_stickers(stickers: &[Sticker]) -> Self {
+        Self {
+            person: pick_icon(stickers, limits::PERSON_EMOJI, TopicIconColor::Blue),
+            group: pick_icon(stickers, limits::GROUP_EMOJI, TopicIconColor::Green),
+        }
+    }
+
+    fn for_title(&self, title: &str) -> TopicOptions {
+        if title.split_whitespace().nth(1) == Some(limits::GROUP_MARK) {
+            self.group.clone()
+        } else {
+            self.person.clone()
+        }
+    }
+}
+
+fn pick_icon(stickers: &[Sticker], prefer: &[&str], color: TopicIconColor) -> TopicOptions {
+    for emoji in prefer {
+        if let Some(id) = stickers
+            .iter()
+            .find(|sticker| sticker.emoji.as_deref() == Some(*emoji))
+            .and_then(|sticker| sticker.custom_emoji_id.clone())
+        {
+            return TopicOptions {
+                icon_color: None,
+                icon_custom_emoji_id: Some(id),
+            };
+        }
+    }
+    TopicOptions {
+        icon_color: Some(color),
+        icon_custom_emoji_id: None,
+    }
 }
 
 impl std::fmt::Debug for BotClient {
@@ -119,6 +178,7 @@ impl BotClient {
             group_id: config.group_id,
             token: config.token,
             queue: RequestQueue::new(),
+            icons: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -256,9 +316,63 @@ impl BotClient {
         attachment: Attachment,
         caption: Option<String>,
     ) -> Result<TgMessageId> {
+        let pin = attachment.file_name.as_deref() == Some(limits::AVATAR_CARD_FILE);
         let method = media::media_method(&attachment)?;
         let upload = media::to_upload(media::prepare_file(&attachment).await?);
-        self.send_upload(topic, method, upload, caption).await
+        let id = self.send_upload(topic, method, upload, caption).await?;
+        if pin && let Err(error) = self.pin_message(id).await {
+            tracing::warn!(topic = topic.0, message = id.0, %error, "avatar card pin failed");
+        }
+        Ok(id)
+    }
+
+    /// Renames a forum topic. The icon is left as it was.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::close_topic`].
+    pub async fn edit_forum_topic(&self, topic: TopicId, title: String) -> Result<()> {
+        let api = self.api.clone();
+        let group_id = self.group_id;
+        let response = self
+            .call(move || {
+                let api = api.clone();
+                let title = title.clone();
+                async move {
+                    let params = EditForumTopicParams::builder()
+                        .chat_id(group_id)
+                        .message_thread_id(topic.0)
+                        .maybe_name(Some(title))
+                        .build();
+                    api.edit_forum_topic(&params).await
+                }
+            })
+            .await?;
+        truthy(response.result)
+    }
+
+    /// Pins a message without a notification.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::close_topic`].
+    pub async fn pin_message(&self, message: TgMessageId) -> Result<()> {
+        let api = self.api.clone();
+        let group_id = self.group_id;
+        let response = self
+            .call(move || {
+                let api = api.clone();
+                async move {
+                    let params = PinChatMessageParams::builder()
+                        .chat_id(group_id)
+                        .message_id(message.0)
+                        .maybe_disable_notification(Some(true))
+                        .build();
+                    api.pin_chat_message(&params).await
+                }
+            })
+            .await?;
+        truthy(response.result)
     }
 
     /// Posts photos as one or more media groups.
@@ -577,6 +691,35 @@ impl BotClient {
         self.queue.run(op).await
     }
 
+    async fn icons_for(&self, title: &str) -> TopicOptions {
+        let mut slot = self.icons.lock().await;
+        if slot.is_none() {
+            let set = match self.fetch_icon_stickers().await {
+                Ok(stickers) => IconSet::from_stickers(&stickers),
+                Err(error) => {
+                    tracing::warn!(%error, "forum icon stickers unavailable");
+                    IconSet::colors_only()
+                }
+            };
+            *slot = Some(set);
+        }
+        match slot.as_ref() {
+            Some(set) => set.for_title(title),
+            None => IconSet::colors_only().for_title(title),
+        }
+    }
+
+    async fn fetch_icon_stickers(&self) -> Result<Vec<Sticker>> {
+        let api = self.api.clone();
+        let response = self
+            .call(move || {
+                let api = api.clone();
+                async move { api.get_forum_topic_icon_stickers().await }
+            })
+            .await?;
+        Ok(response.result)
+    }
+
     async fn call_polling<T, F, Fut>(&self, op: F) -> Result<T>
     where
         F: FnMut() -> Fut + Send,
@@ -588,7 +731,14 @@ impl BotClient {
 
 impl TopicSink for BotClient {
     async fn create_topic(&self, title: String) -> hub_core::Result<TopicId> {
-        self.create_topic_with(title, TopicOptions::default())
+        let options = self.icons_for(&title).await;
+        self.create_topic_with(title, options)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn rename_topic(&self, topic: TopicId, title: String) -> hub_core::Result<()> {
+        self.edit_forum_topic(topic, title)
             .await
             .map_err(Into::into)
     }

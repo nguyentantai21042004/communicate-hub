@@ -23,6 +23,9 @@ use hub_zalo::{SidecarConfig, ZaloAdapter};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+#[path = "hub_import.rs"]
+mod hub_import;
+
 use crate::hub_config::HubConfig;
 use crate::hub_run::{self, RunOptions, default_api_base, lock_hub};
 use crate::paths::Paths;
@@ -52,6 +55,17 @@ pub enum HubCommand {
     Zalo(HubZaloCommand),
     /// Check that the forum group and the bot rights are usable.
     Preflight,
+    /// Copy topic mappings from an old chat-bridges database.
+    ///
+    /// The default is a dry run that prints counts. `--apply` writes them.
+    ImportTopics {
+        /// Old `chat-bridges.sqlite3` file. Opened read-only.
+        #[arg(long)]
+        from: PathBuf,
+        /// Write `topic_map`, conversation titles, and user names.
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 /// Bot token commands.
@@ -99,7 +113,22 @@ pub async fn execute(command: HubCommand, paths: &Paths, profile: &Profile) -> R
         HubCommand::Zalo(HubZaloCommand::Login) => zalo_login(paths).await,
         HubCommand::Zalo(HubZaloCommand::Logout) => zalo_logout(paths),
         HubCommand::Preflight => preflight(&store, profile, paths).await,
+        HubCommand::ImportTopics { from, apply } => import_topics(&from, paths, apply),
     }
+}
+
+fn import_topics(from: &Path, paths: &Paths, apply: bool) -> Result<()> {
+    let hub = if apply {
+        let _lock = match lock_hub(&paths.dir) {
+            Ok(lock) => lock,
+            Err(err) => bail!("{}", hub_import::lock_failure_text(&err)),
+        };
+        Some(SharedHub::open(&paths.store()).context("cannot open the hub store")?)
+    } else {
+        None
+    };
+    let report = hub_import::import_topics(from, hub.as_ref(), apply)?;
+    emit(&report)
 }
 
 /// Writes the bot token. Tests pass [`captain_vault::MemoryStore`].

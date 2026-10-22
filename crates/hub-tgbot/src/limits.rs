@@ -23,6 +23,11 @@ pub const ICON_COLOR_PURPLE: u32 = 0xCB_86_DB; // createForumTopic icon color
 pub const ICON_COLOR_GREEN: u32 = 0x8E_EE_98; // createForumTopic icon color
 pub const ICON_COLOR_PINK: u32 = 0xFF_93_B2; // createForumTopic icon color
 pub const ICON_COLOR_RED: u32 = 0xFB_6F_5F; // createForumTopic icon color
+pub const AVATAR_CARD_FILE: &str = "avatar-card"; // same sentinel as hub-bridge; pin this photo
+pub const PERSON_MARK: &str = "\u{1F464}"; // 👤 second token of a hub-bridge DM title
+pub const GROUP_MARK: &str = "\u{1F465}"; // 👥 second token of a hub-bridge group title
+pub const PERSON_EMOJI: &[&str] = &["\u{1F464}", "\u{1F642}", "\u{1F499}"]; // 👤 🙂 💙
+pub const GROUP_EMOJI: &[&str] = &["\u{1F465}", "\u{1F4AC}", "\u{1F7E2}"]; // 👥 💬 🟢
 
 pub(crate) const HTTP_FORBIDDEN: u64 = 403;
 pub(crate) const HTTP_REQUEST_TIMEOUT: u64 = 408;

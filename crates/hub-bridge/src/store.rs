@@ -4,7 +4,7 @@
 //! topic, or remember a display name. [`BridgeStore`] is the contract this crate drives.
 //! [`MemoryStore`] is the in-memory implementation tests and a process without `SQLite` use.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use hub_core::{ConversationId, ConversationKind, MessageRef, TgMessageId, TopicId};
@@ -224,6 +224,28 @@ pub trait BridgeStore: Send + Sync {
         &self,
         since_unix_secs: i64,
     ) -> impl Future<Output = Result<Vec<i64>>> + Send;
+
+    /// Whether the avatar card was already posted for `conversation`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Store`] when the read fails.
+    fn avatar_posted(
+        &self,
+        conversation: &ConversationId,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Records that the avatar card was posted for `conversation`.
+    ///
+    /// A second call leaves the flag set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Store`] when the write fails.
+    fn mark_avatar_posted(
+        &self,
+        conversation: &ConversationId,
+    ) -> impl Future<Output = Result<()>> + Send;
 }
 
 #[derive(Debug, Default)]
@@ -236,6 +258,7 @@ struct MemoryInner {
     failures: Vec<FailureRecord>,
     retries: Vec<i64>,
     restores: u64,
+    avatar_posted: HashSet<ConversationId>,
     #[cfg(test)]
     lookups: Vec<(String, Option<String>)>,
 }
@@ -429,6 +452,15 @@ impl BridgeStore for MemoryStore {
             .copied()
             .filter(|at| *at >= since_unix_secs)
             .collect())
+    }
+
+    async fn avatar_posted(&self, conversation: &ConversationId) -> Result<bool> {
+        Ok(self.lock().avatar_posted.contains(conversation))
+    }
+
+    async fn mark_avatar_posted(&self, conversation: &ConversationId) -> Result<()> {
+        self.lock().avatar_posted.insert(conversation.clone());
+        Ok(())
     }
 }
 
