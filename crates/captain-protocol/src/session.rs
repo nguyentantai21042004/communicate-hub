@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use captain_vault::{Secret, Vault, write_private};
 use grammers_session::types::{
@@ -21,23 +21,74 @@ const AUTH_ENTRY: &str = "mtproto_auth";
 const STATE_FILE: &str = "mtproto_state.json";
 const STATE_VERSION: u32 = 1;
 const AUTH_KEY_BYTES: usize = 256;
+/// Refusals this process records before every later Telegram call is unauthorized.
+///
+/// grammers negotiates a fresh auth key before `set_dc_option`. One refusal means that
+/// key was already minted and not stored. The next call must not mint another.
+pub(crate) const AUTH_KEY_NEGOTIATION_CAP: u32 = 1;
 
 /// grammers [`Session`] that keeps auth keys in the Keychain and the rest on disk.
 ///
 /// Auth key and home datacenter changes are written through immediately; they are rare.
 /// Peer cache and update state changes only mark the session dirty, and [`Self::flush`] writes
 /// them. The connection flushes periodically and on shutdown.
+///
+/// A datacenter that already has an auth key keeps that key. [`Self::replace_auth_key`] is the
+/// only way to overwrite it, and only [`crate::Connection::login`] holds that guard.
+///
+/// A refused replacement latches [`Self::auth_key_conflict`] for the rest of this process.
+/// Callers stop instead of letting grammers negotiate another key.
 pub struct KeychainSession {
     data: Mutex<SessionData>,
     vault: Vault,
     state_path: PathBuf,
     dirty: AtomicBool,
+    allow_replace: Arc<AtomicBool>,
+    /// Set when a stored key was kept. Independent of the refusal counter.
+    auth_conflict: AtomicBool,
+    /// How many replacements this process has refused.
+    refusals: AtomicU32,
+}
+
+/// Held for the body of [`crate::Connection::login`] so sign-in may replace an auth key.
+#[must_use = "dropping this ends the login replace window immediately"]
+pub(crate) struct AuthKeyReplace {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for AuthKeyReplace {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 /// Error raised by [`KeychainSession`] through the grammers [`Session`] trait.
 #[derive(Debug, thiserror::Error)]
-#[error("session storage: {0}")]
-pub struct SessionError(String);
+pub enum SessionError {
+    /// The Keychain entry or the state file could not be read or written.
+    #[error("session storage: {0}")]
+    Storage(String),
+    /// A new auth key was refused because this datacenter already has one.
+    ///
+    /// The stored key is unchanged. The owner has to run `captain auth login`.
+    #[error("refusing to replace a stored auth key; run `captain auth login`")]
+    AuthKeyConflict,
+}
+
+impl SessionError {
+    /// Whether grammers tried to replace a stored auth key and this session kept the old one.
+    pub(crate) fn is_auth_key_conflict(&self) -> bool {
+        matches!(self, Self::AuthKeyConflict)
+    }
+}
+
+/// True when either signal says this process must not negotiate another auth key.
+///
+/// `refusals` counts replacements that were turned down. At [`AUTH_KEY_NEGOTIATION_CAP`]
+/// the process is unauthorized even when `flag` was not stored.
+pub(crate) fn conflict_latched(flag: bool, refusals: u32) -> bool {
+    flag || refusals >= AUTH_KEY_NEGOTIATION_CAP
+}
 
 #[derive(Serialize, Deserialize)]
 struct StoredAuth {
@@ -92,7 +143,65 @@ impl KeychainSession {
             vault,
             state_path,
             dirty: AtomicBool::new(false),
+            allow_replace: Arc::new(AtomicBool::new(false)),
+            auth_conflict: AtomicBool::new(false),
+            refusals: AtomicU32::new(0),
         })
+    }
+
+    /// Whether a stored auth key was kept and a replacement was refused.
+    ///
+    /// True when the flag is set or the refusal count has reached
+    /// [`AUTH_KEY_NEGOTIATION_CAP`], so a missed flag store still stops the process.
+    pub(crate) fn auth_key_conflict(&self) -> bool {
+        conflict_latched(
+            self.auth_conflict.load(Ordering::Acquire),
+            self.refusals.load(Ordering::Acquire),
+        )
+    }
+
+    /// How many auth-key replacements this process has refused.
+    #[cfg(test)]
+    pub(crate) fn refusals(&self) -> u32 {
+        self.refusals.load(Ordering::Acquire)
+    }
+
+    /// Datacenter id the session uses for the account.
+    pub(crate) fn home_dc(&self) -> i32 {
+        self.lock().home_dc
+    }
+
+    fn note_auth_key_refusal(&self) {
+        self.refusals.fetch_add(1, Ordering::AcqRel);
+        self.auth_conflict.store(true, Ordering::Release);
+    }
+
+    fn clear_auth_key_conflict(&self) {
+        self.auth_conflict.store(false, Ordering::Release);
+        self.refusals.store(0, Ordering::Release);
+    }
+
+    /// Permits replacing a stored auth key until the guard is dropped.
+    ///
+    /// Only [`crate::Connection::login`] may call this. Every other `set_dc_option` that brings
+    /// a different key for a datacenter that already has one is refused and leaves the stored
+    /// key in place.
+    pub(crate) fn replace_auth_key(&self) -> AuthKeyReplace {
+        self.allow_replace.store(true, Ordering::Release);
+        AuthKeyReplace {
+            flag: Arc::clone(&self.allow_replace),
+        }
+    }
+
+    pub(crate) fn home_auth_key(&self) -> Option<[u8; AUTH_KEY_BYTES]> {
+        let data = self.lock();
+        data.dc_options
+            .get(&data.home_dc)
+            .and_then(|dc| dc.auth_key)
+    }
+
+    pub(crate) fn profile_name(&self) -> &str {
+        self.vault.profile().as_str()
     }
 
     /// Whether an auth key exists for the home datacenter. It does not prove the key is still
@@ -206,18 +315,34 @@ impl Session for KeychainSession {
     ) -> grammers_session::BoxFuture<'_, Result<(), SessionError>> {
         let dc_option = dc_option.clone();
         Box::pin(async move {
+            let dc_id = dc_option.id;
+            // The lock must not cover `write_auth`: that call takes the lock again.
             let key_changed = {
                 let mut data = self.lock();
-                let old_key = data
-                    .dc_options
-                    .get(&dc_option.id)
-                    .and_then(|dc| dc.auth_key);
-                let changed = old_key != dc_option.auth_key;
-                data.dc_options.insert(dc_option.id, dc_option);
-                changed
+                let old_key = data.dc_options.get(&dc_id).and_then(|dc| dc.auth_key);
+                let replacing = old_key.is_some() && old_key != dc_option.auth_key;
+                if replacing && !self.allow_replace.load(Ordering::Acquire) {
+                    None
+                } else {
+                    let changed = old_key != dc_option.auth_key;
+                    data.dc_options.insert(dc_id, dc_option);
+                    Some(changed)
+                }
+            };
+            let Some(key_changed) = key_changed else {
+                self.note_auth_key_refusal();
+                tracing::error!(
+                    dc_id,
+                    "refusing to replace a stored auth key outside captain auth login"
+                );
+                return Err(SessionError::AuthKeyConflict);
             };
             if key_changed {
                 self.write_auth()?;
+                // Login just stored the key it negotiated. Later calls in this process may use it.
+                if self.allow_replace.load(Ordering::Acquire) {
+                    self.clear_auth_key_conflict();
+                }
             }
             self.write_state()
         })
@@ -282,7 +407,7 @@ impl Session for KeychainSession {
 }
 
 fn err(e: impl std::fmt::Display) -> SessionError {
-    SessionError(e.to_string())
+    SessionError::Storage(e.to_string())
 }
 
 fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, SessionError> {
@@ -305,7 +430,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn decode_key(hex: &str) -> Result<[u8; AUTH_KEY_BYTES], SessionError> {
     let bad = || {
-        SessionError(format!(
+        SessionError::Storage(format!(
             "auth key is not {AUTH_KEY_BYTES} hex-encoded bytes"
         ))
     };
@@ -400,6 +525,126 @@ mod tests {
         assert!(store.entries().is_empty());
         assert!(!dir.join(STATE_FILE).exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn set_dc_option_rejects_a_different_auth_key_outside_login() {
+        let dir = temp_dir("keep-key");
+        let store = Arc::new(MemoryStore::default());
+        let vault = vault(store.clone(), &dir);
+        let session = KeychainSession::load(vault.clone()).unwrap();
+        let mut dc = session.dc_option(2).unwrap().unwrap();
+        dc.auth_key = Some([7u8; AUTH_KEY_BYTES]);
+        session.set_dc_option(&dc).await.unwrap();
+        session.set_home_dc_id(2).await.unwrap();
+        let stored = vault.secret(AUTH_ENTRY).unwrap().unwrap();
+        let original = stored.expose().to_owned();
+
+        dc.auth_key = Some([9u8; AUTH_KEY_BYTES]);
+        let rejected = session.set_dc_option(&dc).await.unwrap_err();
+        assert!(rejected.is_auth_key_conflict(), "{rejected}");
+        assert!(
+            rejected.to_string().contains("captain auth login"),
+            "{rejected}"
+        );
+        assert!(session.auth_key_conflict());
+        assert_eq!(session.refusals(), 1);
+        assert!(!rejected.to_string().contains("session error"));
+        assert_eq!(
+            session.dc_option(2).unwrap().unwrap().auth_key,
+            Some([7u8; AUTH_KEY_BYTES])
+        );
+        assert_eq!(session.home_auth_key(), Some([7u8; AUTH_KEY_BYTES]));
+        assert_eq!(
+            vault.secret(AUTH_ENTRY).unwrap().unwrap().expose(),
+            original
+        );
+        assert!(!original.contains(&encode_hex(&[9u8; AUTH_KEY_BYTES])));
+
+        dc.auth_key = None;
+        assert!(session.set_dc_option(&dc).await.is_err());
+        assert_eq!(session.home_auth_key(), Some([7u8; AUTH_KEY_BYTES]));
+
+        let mut same = session.dc_option(2).unwrap().unwrap();
+        same.ipv4 = std::net::SocketAddrV4::new(std::net::Ipv4Addr::new(1, 2, 3, 4), 443);
+        session.set_dc_option(&same).await.unwrap();
+        assert_eq!(session.home_auth_key(), Some([7u8; AUTH_KEY_BYTES]));
+        assert_eq!(
+            vault.secret(AUTH_ENTRY).unwrap().unwrap().expose(),
+            original
+        );
+
+        dc.auth_key = Some([9u8; AUTH_KEY_BYTES]);
+        let _guard = session.replace_auth_key();
+        session.set_dc_option(&dc).await.unwrap();
+        assert_eq!(session.home_auth_key(), Some([9u8; AUTH_KEY_BYTES]));
+        assert!(!session.auth_key_conflict());
+        drop(_guard);
+        dc.auth_key = Some([8u8; AUTH_KEY_BYTES]);
+        assert!(
+            session
+                .set_dc_option(&dc)
+                .await
+                .unwrap_err()
+                .is_auth_key_conflict()
+        );
+        assert!(session.auth_key_conflict());
+        assert_eq!(session.home_auth_key(), Some([9u8; AUTH_KEY_BYTES]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::panic,
+        reason = "the replace guard has to drop while this login unwinds"
+    )]
+    async fn replace_guard_releases_on_error_and_on_panic() {
+        let dir = temp_dir("guard");
+        let session =
+            Arc::new(KeychainSession::load(vault(Arc::new(MemoryStore::default()), &dir)).unwrap());
+        let mut dc = session.dc_option(2).unwrap().unwrap();
+        dc.auth_key = Some([7u8; AUTH_KEY_BYTES]);
+        session.set_dc_option(&dc).await.unwrap();
+        session.set_home_dc_id(2).await.unwrap();
+
+        fn login_fails(session: &KeychainSession) -> Result<(), &'static str> {
+            let _guard = session.replace_auth_key();
+            Err("the login code was rejected")
+        }
+        assert!(login_fails(&session).is_err());
+        dc.auth_key = Some([9u8; AUTH_KEY_BYTES]);
+        assert!(
+            session
+                .set_dc_option(&dc)
+                .await
+                .unwrap_err()
+                .is_auth_key_conflict()
+        );
+        assert_eq!(session.home_auth_key(), Some([7u8; AUTH_KEY_BYTES]));
+
+        let cloned = Arc::clone(&session);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cloned.replace_auth_key();
+            panic!("login failed");
+        }));
+        assert!(panicked.is_err());
+        dc.auth_key = Some([8u8; AUTH_KEY_BYTES]);
+        assert!(
+            session
+                .set_dc_option(&dc)
+                .await
+                .unwrap_err()
+                .is_auth_key_conflict()
+        );
+        assert_eq!(session.home_auth_key(), Some([7u8; AUTH_KEY_BYTES]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn conflict_latches_on_the_flag_or_the_cap() {
+        assert!(!conflict_latched(false, 0));
+        assert!(conflict_latched(true, 0));
+        assert!(conflict_latched(false, AUTH_KEY_NEGOTIATION_CAP));
     }
 
     #[test]

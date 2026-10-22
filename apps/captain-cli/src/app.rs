@@ -1,16 +1,20 @@
 //! State shared by the daemon's tasks, and the operations both the socket and the web UI offer.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use captain_core::{ChatSummary, InboundEvent};
 use captain_inbox::{ExplicitLabel, Policy, Scope, TicketState, TriggerKind, report};
 use captain_protocol::Handle;
 use captain_store::{Store, TicketFilter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::Instant;
 
 use crate::paths::Paths;
 use crate::pipeline::PipelineInput;
@@ -18,6 +22,8 @@ use crate::pipeline::PipelineInput;
 const SECS_PER_DAY: i64 = 86_400;
 const HISTORY_SCAN_CAP: usize = 20_000; // 200 getHistory pages; keeps one search from hammering the API
 const PRIVATE_POST_URL: &str = "https://t.me/c"; // opens a channel message for its members
+const SENDER_TICKET_CAP: usize = 10_000; // one pass over tickets when counting senders
+const READ_BUSY_TIMEOUT: Duration = Duration::from_secs(5); // wait while the daemon holds the file
 
 pub fn now_unix() -> i64 {
     SystemTime::now()
@@ -48,6 +54,146 @@ impl Db {
         .await
         .context("store task panicked")?
     }
+}
+
+/// One module log row. `detail` is not message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModuleLog {
+    /// When it happened, Unix seconds.
+    pub at_unix_secs: i64,
+    /// Module name.
+    pub module: String,
+    /// Stored level name.
+    pub level: String,
+    /// Machine tag, for example `send_failed`.
+    pub kind: String,
+    /// Short note. Empty when the column is null.
+    pub detail: String,
+}
+
+/// Inbound sender names and counts in `[since_unix_secs, until_unix_secs)`.
+///
+/// The store's message read includes text. This function drops that field and returns only
+/// the display name and the count.
+///
+/// # Errors
+///
+/// Returns the store error when a ticket or its messages cannot be read.
+pub(crate) fn sender_counts(
+    store: &Store,
+    since_unix_secs: i64,
+    until_unix_secs: i64,
+    limit: usize,
+) -> captain_store::Result<Vec<(String, u64)>> {
+    let tickets = store.tickets(&TicketFilter {
+        since: Some(since_unix_secs),
+        limit: Some(SENDER_TICKET_CAP),
+        ..TicketFilter::default()
+    })?;
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for ticket in tickets {
+        for message in store.ticket_message_bodies(ticket.id)? {
+            if message.outgoing || message.date < since_unix_secs || message.date >= until_unix_secs
+            {
+                continue;
+            }
+            let Some(name) = message.sender_name.filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            *counts.entry(name).or_default() += 1;
+        }
+    }
+    let mut rows: Vec<(String, u64)> = counts.into_iter().collect();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    rows.truncate(limit);
+    Ok(rows)
+}
+
+/// Newest module log rows, at most `limit`.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or a count does not fit in `u64`.
+pub(crate) fn module_logs(path: &Path, limit: u32) -> Result<Vec<ModuleLog>> {
+    let conn = open_read(path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts, module, level, kind, coalesce(detail, '')
+             FROM module_events
+             ORDER BY ts DESC, id DESC
+             LIMIT ?1",
+        )
+        .context("module events")?;
+    let rows = stmt
+        .query_map([i64::from(limit)], |row| {
+            Ok(ModuleLog {
+                at_unix_secs: row.get(0)?,
+                module: row.get(1)?,
+                level: row.get(2)?,
+                kind: row.get(3)?,
+                detail: row.get(4)?,
+            })
+        })
+        .context("module events")?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .context("module events")
+}
+
+/// How many module log rows of `kind` fall in the half-open window.
+///
+/// `since_unix_secs` of `None` counts every row before `until_unix_secs`.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or the count does not fit in `u64`.
+pub(crate) fn count_module_kind(
+    path: &Path,
+    kind: &str,
+    since_unix_secs: Option<i64>,
+    until_unix_secs: i64,
+) -> Result<u64> {
+    let conn = open_read(path)?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM module_events
+             WHERE kind = ?1 AND ts < ?2 AND (?3 IS NULL OR ts >= ?3)",
+            params![kind, until_unix_secs, since_unix_secs],
+            |row| row.get(0),
+        )
+        .context("module event count")?;
+    u64::try_from(count).context("module event count")
+}
+
+/// Detail of the newest module log row of `kind` in the half-open window.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read.
+pub(crate) fn latest_module_detail(
+    path: &Path,
+    kind: &str,
+    since_unix_secs: Option<i64>,
+    until_unix_secs: i64,
+) -> Result<Option<String>> {
+    let conn = open_read(path)?;
+    conn.query_row(
+        "SELECT detail FROM module_events
+         WHERE kind = ?1 AND ts < ?2 AND (?3 IS NULL OR ts >= ?3)
+         ORDER BY ts DESC, id DESC
+         LIMIT 1",
+        params![kind, until_unix_secs, since_unix_secs],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("module event detail")
+}
+
+fn open_read(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    conn.busy_timeout(READ_BUSY_TIMEOUT)
+        .context("module event timeout")?;
+    Ok(conn)
 }
 
 /// Scope and policy, replaced whole on reload.
@@ -87,6 +233,132 @@ fn read_optional(path: &std::path::Path) -> Result<Option<String>> {
     }
 }
 
+/// Reconnect counters the status JSON reports. In memory for the life of the process.
+pub struct Health {
+    /// `true` while the update stream is down and a reconnect is in progress.
+    pub reconnecting: AtomicBool,
+    /// Unix times of reconnects that succeeded.
+    pub reconnect_at: Mutex<Vec<i64>>,
+    /// Unix time of the latest drop. `0` when none has happened.
+    pub last_drop_at: AtomicI64,
+    /// Seconds the latest drop lasted. `-1` when none has finished.
+    pub last_drop_secs: AtomicI64,
+    /// `true` when the latest catch-up did not close the gap.
+    pub gap_unfilled: AtomicBool,
+    /// `true` after enough non-link read failures, or while a flood wait is in progress.
+    pub degraded: AtomicBool,
+    degraded_reason: Mutex<Option<String>>,
+    flood_until: Mutex<Option<Instant>>,
+}
+
+impl Health {
+    pub(crate) fn new() -> Self {
+        Self {
+            reconnecting: AtomicBool::new(false),
+            reconnect_at: Mutex::new(Vec::new()),
+            last_drop_at: AtomicI64::new(0),
+            last_drop_secs: AtomicI64::new(-1),
+            gap_unfilled: AtomicBool::new(false),
+            degraded: AtomicBool::new(false),
+            degraded_reason: Mutex::new(None),
+            flood_until: Mutex::new(None),
+        }
+    }
+
+    fn reason_slot(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        match self.degraded_reason.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn flood_slot(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        match self.flood_until.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Records the class of non-link read failures inside the failure window.
+    pub(crate) fn mark_degraded(&self, reason: &str) {
+        self.degraded.store(true, Ordering::Relaxed);
+        *self.reason_slot() = Some(reason.to_owned());
+        *self.flood_slot() = None;
+    }
+
+    /// Marks an in-progress flood. `connection` is `degraded` and the reason is `flood_wait`.
+    pub(crate) fn mark_flood(&self, remaining: Duration) {
+        self.degraded.store(true, Ordering::Relaxed);
+        *self.reason_slot() = Some("flood_wait".to_owned());
+        *self.flood_slot() = Some(Instant::now() + remaining);
+    }
+
+    /// Seconds left on the in-progress flood, or `None` when there is not one.
+    pub(crate) fn flood_wait_secs(&self) -> Option<u64> {
+        let until = (*self.flood_slot())?;
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            None
+        } else {
+            // A partial second still counts, so a 31 s wait does not show 30 immediately.
+            Some(left.as_secs() + u64::from(left.subsec_nanos() != 0))
+        }
+    }
+
+    /// Clears a degraded read. Called when an update arrives or the stream is restored.
+    pub(crate) fn clear_degraded(&self) {
+        self.degraded.store(false, Ordering::Relaxed);
+        *self.reason_slot() = None;
+        *self.flood_slot() = None;
+    }
+
+    pub(crate) fn degraded_reason(&self) -> Option<String> {
+        self.reason_slot().clone()
+    }
+
+    /// Status `connection` value. Unauthorized wins, then reconnecting, then degraded.
+    pub(crate) fn connection(&self, unauthorized: bool) -> &'static str {
+        if unauthorized {
+            "unauthorized"
+        } else if self.reconnecting.load(Ordering::Relaxed) {
+            "reconnecting"
+        } else if self.degraded.load(Ordering::Relaxed) {
+            "degraded"
+        } else {
+            "connected"
+        }
+    }
+
+    pub(crate) fn begin_drop(&self, at: i64) {
+        self.reconnecting.store(true, Ordering::Relaxed);
+        self.gap_unfilled.store(true, Ordering::Relaxed);
+        self.last_drop_at.store(at, Ordering::Relaxed);
+        self.last_drop_secs.store(-1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn end_drop(&self, at: i64, secs: i64, gap_closed: bool) {
+        self.reconnecting.store(false, Ordering::Relaxed);
+        self.gap_unfilled.store(!gap_closed, Ordering::Relaxed);
+        self.last_drop_secs.store(secs, Ordering::Relaxed);
+        let mut times = match self.reconnect_at.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        times.push(at);
+        let cutoff = at - SECS_PER_DAY;
+        times.retain(|stamp| *stamp >= cutoff);
+    }
+
+    pub(crate) fn reconnects_24h(&self, now: i64) -> usize {
+        let times = match self.reconnect_at.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let cutoff = now - SECS_PER_DAY;
+        times.iter().filter(|stamp| **stamp >= cutoff).count()
+    }
+}
+
 /// What only a running daemon has: the Telegram handle and the pipeline.
 pub struct Live {
     pub handle: Handle,
@@ -97,6 +369,7 @@ pub struct Live {
     pub open_bursts: AtomicUsize,
     pub caught_up: AtomicU64,
     pub unauthorized: AtomicBool,
+    pub health: Health,
 }
 
 /// Everything the daemon's tasks share.
@@ -139,21 +412,43 @@ impl App {
             })
             .collect();
         let config = self.config();
-        let (connection, me, last_update_at, open_bursts) = match &self.live {
-            Some(live) if live.unauthorized.load(Ordering::Relaxed) => {
-                ("unauthorized", Some(&live.me), None, 0)
+        let (connection, me, last_update_at, open_bursts, health) = match &self.live {
+            Some(live) => {
+                let unauthorized = live.unauthorized.load(Ordering::Relaxed);
+                (
+                    live.health.connection(unauthorized),
+                    Some(&live.me),
+                    if unauthorized {
+                        None
+                    } else {
+                        Some(live.last_update_at.load(Ordering::Relaxed)).filter(|t| *t > 0)
+                    },
+                    if unauthorized {
+                        0
+                    } else {
+                        live.open_bursts.load(Ordering::Relaxed)
+                    },
+                    Some(&live.health),
+                )
             }
-            Some(live) => (
-                "connected",
-                Some(&live.me),
-                Some(live.last_update_at.load(Ordering::Relaxed)).filter(|t| *t > 0),
-                live.open_bursts.load(Ordering::Relaxed),
-            ),
-            None => ("offline", None, None, 0),
+            None => ("offline", None, None, 0, None),
         };
+        let now = now_unix();
+        let last_drop_at = health
+            .map(|h| h.last_drop_at.load(Ordering::Relaxed))
+            .filter(|t| *t > 0);
+        let last_drop_secs = health
+            .map(|h| h.last_drop_secs.load(Ordering::Relaxed))
+            .filter(|secs| *secs >= 0);
         Ok(json!({
             "profile": self.profile,
             "connection": connection,
+            "degraded_reason": health.and_then(|h| h.degraded_reason()),
+            "flood_wait_secs": health.and_then(|h| h.flood_wait_secs()),
+            "reconnects_24h": health.map(|h| h.reconnects_24h(now)).unwrap_or(0),
+            "last_drop_at": last_drop_at,
+            "last_drop_secs": last_drop_secs,
+            "gap_unfilled": health.is_some_and(|h| h.gap_unfilled.load(Ordering::Relaxed)),
             "me": me,
             "paused": self.paused.load(Ordering::Relaxed),
             "started_at": self.started_at,
@@ -415,5 +710,40 @@ mod tests {
 
         let group = history_matches(ChatId(-5_110_213_073), &newest_first[2..], &regex);
         assert!(group[0]["link"].is_null());
+    }
+
+    #[test]
+    fn reconnects_count_for_one_day() {
+        use std::sync::atomic::Ordering;
+
+        let health = Health::new();
+        let at = 1_700_000_000;
+        health.begin_drop(at);
+        assert!(health.reconnecting.load(Ordering::Relaxed));
+        assert!(health.gap_unfilled.load(Ordering::Relaxed));
+        assert_eq!(health.last_drop_secs.load(Ordering::Relaxed), -1);
+        assert_eq!(health.connection(false), "reconnecting");
+        health.mark_degraded("other");
+        assert_eq!(health.connection(false), "reconnecting");
+        assert_eq!(health.connection(true), "unauthorized");
+        health.end_drop(at, 4, true);
+        assert!(!health.reconnecting.load(Ordering::Relaxed));
+        assert!(!health.gap_unfilled.load(Ordering::Relaxed));
+        assert_eq!(health.last_drop_at.load(Ordering::Relaxed), at);
+        assert_eq!(health.last_drop_secs.load(Ordering::Relaxed), 4);
+        assert_eq!(health.reconnects_24h(at), 1);
+        assert_eq!(health.reconnects_24h(at + super::SECS_PER_DAY), 1);
+        assert_eq!(health.reconnects_24h(at + super::SECS_PER_DAY + 1), 0);
+        assert_eq!(health.connection(false), "degraded");
+        assert_eq!(health.degraded_reason().as_deref(), Some("other"));
+        health.clear_degraded();
+        assert_eq!(health.connection(false), "connected");
+        assert!(health.degraded_reason().is_none());
+        health.mark_flood(Duration::from_secs(31));
+        assert_eq!(health.connection(false), "degraded");
+        assert_eq!(health.degraded_reason().as_deref(), Some("flood_wait"));
+        assert_eq!(health.flood_wait_secs(), Some(31));
+        health.clear_degraded();
+        assert!(health.flood_wait_secs().is_none());
     }
 }

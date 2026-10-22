@@ -26,6 +26,9 @@ pub enum MetricKind {
     StoreSize,
     /// The account wrote in a private chat, scoped or not. Chat id and time only.
     OutgoingDm,
+    /// A dropped update stream. `a` is seconds until it was back, `b` is 1 when catch-up
+    /// closed the gap, and `tag` is the reason class.
+    StreamDrop,
 }
 
 impl MetricKind {
@@ -40,6 +43,7 @@ impl MetricKind {
             Self::ContextDensity => "context_density",
             Self::StoreSize => "store_size",
             Self::OutgoingDm => "outgoing_dm",
+            Self::StreamDrop => "stream_drop",
         }
     }
 }
@@ -144,6 +148,19 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// How many events of `kind` were recorded at or after `since`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Sqlite`] on a read failure.
+    pub fn count_metrics(&self, kind: MetricKind, since: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM metric_events WHERE kind = ?1 AND at >= ?2",
+            params![kind.as_str(), since],
+            |row| row.get(0),
+        )?)
     }
 
     /// Number of stored messages, for the daily size sample.

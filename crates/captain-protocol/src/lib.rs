@@ -13,6 +13,6 @@ mod outbound;
 mod session;
 
 pub use connection::{Connection, LoginPrompt};
-pub use error::{Error, Result};
+pub use error::{Error, Result, TelegramFailure, classify_failure};
 pub use handle::Handle;
 pub use session::{KeychainSession, SessionError};
