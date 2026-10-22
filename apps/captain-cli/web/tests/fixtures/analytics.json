@@ -1,0 +1,26 @@
+{
+  "heatmap": [
+    { "weekday": 0, "hour": 9, "messages": 4 },
+    { "weekday": 2, "hour": 15, "messages": 16 },
+    { "weekday": 6, "hour": 0, "messages": 0 }
+  ],
+  "funnel": {
+    "queued": 6,
+    "draft": "not available in P1",
+    "resolved": [
+      { "label": "answered", "count": 187 },
+      { "label": "answered_elsewhere", "count": 44 },
+      { "label": "read_only", "count": 96 },
+      { "label": "unseen", "count": 79 }
+    ]
+  },
+  "top_conversations": [
+    { "source": "telegram", "title": "Backend team", "messages": 1842 },
+    { "source": "zalo", "title": "Nhóm Kho Quận 7", "messages": 620 }
+  ],
+  "response_p50": [
+    { "day": 20370, "p50_minutes": 18, "sample": 12, "low_sample": false },
+    { "day": 20371, "p50_minutes": 4, "sample": 2, "low_sample": true },
+    { "day": 20372, "p50_minutes": null, "sample": 0, "low_sample": true }
+  ]
+}

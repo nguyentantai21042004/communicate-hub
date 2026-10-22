@@ -1,0 +1,11 @@
+{
+  "events": [
+    {
+      "at_unix_secs": 1760000000,
+      "module": "zalo-bridge",
+      "level": "info",
+      "kind": "relogin",
+      "detail": "QR flow started"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "connection": {
+    "uptime": 0.99,
+    "gaps_unfilled": 0,
+    "lag_p50_secs": 1,
+    "lag_p99_secs": 4,
+    "last_catch_up_unix_secs": 1760000000,
+    "reconnects_24h": 1
+  },
+  "session": { "account": "Tài", "storage": "keychain", "connection": "connected" },
+  "triggers": [
+    { "trigger": "dm_all", "count": 171, "open": 2, "resolved_ratio": 0.99, "route": "draft" },
+    { "trigger": "mention", "count": 84, "open": 2, "resolved_ratio": 0.98, "route": "draft" },
+    { "trigger": "reply_to_me", "count": 75, "open": 1, "resolved_ratio": 0.99, "route": "draft" },
+    { "trigger": "keyword", "count": 38, "open": 2, "resolved_ratio": null, "route": "digest" }
+  ],
+  "scope": { "watched": 119, "with_messages": 94, "with_tickets": 52, "with_open_tickets": 6 },
+  "candidates": [
+    {
+      "title": "Nhóm Ops Miền Nam",
+      "would_trigger": 37,
+      "messages": 612,
+      "snippet": "[[chat]]\nid = -1002187735482\nlabel = \"Nhóm Ops Miền Nam\"\nkind = \"group\"\ntriggers = [\"mention\", \"reply_to_me\"]\n"
+    }
+  ],
+  "top_senders": []
+}

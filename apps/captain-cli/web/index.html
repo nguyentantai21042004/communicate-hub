@@ -6,7 +6,15 @@
   <meta name="color-scheme" content="light dark">
   <title>Captain</title>
   <link rel="stylesheet" href="/assets/app.css">
+  <script type="module" src="/assets/format.mjs"></script>
   <script src="/assets/app.js" defer></script>
+  <script src="/assets/overview.js" defer></script>
+  <script src="/assets/conversations.js" defer></script>
+  <script src="/assets/analytics.js" defer></script>
+  <script src="/assets/telegram.js" defer></script>
+  <script src="/assets/zalo.js" defer></script>
+  <script src="/assets/health.js" defer></script>
+  <script src="/assets/boot.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -22,6 +30,11 @@
   </header>
 
   <nav class="tabs" aria-label="Sections">
+    <a href="#overview" data-view="overview" lang="vi">Tổng quan</a>
+    <a href="#conversations" data-view="conversations" lang="vi">Hội thoại</a>
+    <a href="#analytics" data-view="analytics" lang="vi">Phân tích</a>
+    <a href="#telegram" data-view="telegram">Telegram</a>
+    <a href="#zalo" data-view="zalo">Zalo</a>
     <a href="#tickets" data-view="tickets">Tickets</a>
     <a href="#metrics" data-view="metrics">Metrics</a>
     <a href="#scope" data-view="scope">Scope</a>
@@ -29,6 +42,53 @@
   </nav>
 
   <main id="main" tabindex="-1">
+    <section id="view-overview" class="view" lang="vi" aria-labelledby="h-overview" hidden>
+      <div class="view-head">
+        <h1 id="h-overview">Tổng quan</h1>
+        <div class="toolbar" id="overview-toolbar"></div>
+      </div>
+      <p class="list-count" id="overview-status" aria-live="polite"></p>
+      <div id="overview-body"></div>
+    </section>
+
+    <section id="view-conversations" class="view" lang="vi" aria-labelledby="h-conversations" hidden>
+      <div class="view-head">
+        <h1 id="h-conversations">Hội thoại</h1>
+        <button class="btn btn-quiet" id="conversations-refresh" type="button">Làm mới</button>
+      </div>
+      <form class="filters stack" id="conversations-filters"></form>
+      <p class="list-count" id="conversations-count" aria-live="polite"></p>
+      <div id="conversations-banner"></div>
+      <div id="conversations-body"></div>
+    </section>
+
+    <section id="view-analytics" class="view" lang="vi" aria-labelledby="h-analytics" hidden>
+      <div class="view-head">
+        <h1 id="h-analytics">Phân tích</h1>
+        <div class="toolbar" id="analytics-toolbar"></div>
+      </div>
+      <p class="list-count" id="analytics-status" aria-live="polite"></p>
+      <div id="analytics-body"></div>
+    </section>
+
+    <section id="view-telegram" class="view" lang="vi" aria-labelledby="h-telegram" hidden>
+      <div class="view-head">
+        <h1 id="h-telegram">Telegram</h1>
+        <div class="toolbar" id="telegram-toolbar"></div>
+      </div>
+      <p class="list-count" id="telegram-status" aria-live="polite"></p>
+      <div id="telegram-body"></div>
+    </section>
+
+    <section id="view-zalo" class="view" lang="vi" aria-labelledby="h-zalo" hidden>
+      <div class="view-head">
+        <h1 id="h-zalo">Zalo</h1>
+        <div class="toolbar" id="zalo-toolbar"></div>
+      </div>
+      <p class="list-count" id="zalo-status" aria-live="polite"></p>
+      <div id="zalo-body"></div>
+    </section>
+
     <section id="view-tickets" class="view" aria-labelledby="h-tickets" hidden>
       <div class="view-head">
         <h1 id="h-tickets">Tickets</h1>
@@ -99,6 +159,7 @@
       <div class="view-head">
         <h1 id="h-health">Health</h1>
       </div>
+      <p class="list-count" id="health-status" aria-live="polite"></p>
       <div id="health-body"></div>
     </section>
   </main>

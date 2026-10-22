@@ -1,0 +1,15 @@
+{
+  "chat": -1001897450231,
+  "scanned": 3000,
+  "oldest_scanned": 48000,
+  "more_before": true,
+  "matches": [
+    {
+      "id": 48612,
+      "date_unix": 1760000000,
+      "sender": "Quang",
+      "text": "hidden until asked",
+      "link": "https://t.me/c/1897450231/48612"
+    }
+  ]
+}

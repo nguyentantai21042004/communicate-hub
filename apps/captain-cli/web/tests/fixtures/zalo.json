@@ -1,0 +1,23 @@
+{
+  "bridge": { "state": "ok", "detail": "" },
+  "session": { "account": "Tài", "storage": "keychain", "state": "valid" },
+  "send_queue": { "waiting": 2, "rate_limits_24h": 1, "retry_after_secs": 12 },
+  "topics": [
+    { "title": "Nhóm Kho Quận 7", "external_id": "7283…8815", "topic_id": 31 }
+  ],
+  "message_kinds_14d": [
+    { "kind": "text", "count": 2198 },
+    { "kind": "photo", "count": 412 }
+  ],
+  "failed_events": [
+    {
+      "id": 4,
+      "reason": "rate limited",
+      "conversation": "Nhóm Kho Quận 7",
+      "at_unix_secs": 1760000000,
+      "retryable": true
+    }
+  ],
+  "pending_friend_requests": 3,
+  "groups_without_topic": { "count": 1, "names": ["Nhóm Gia đình"] }
+}

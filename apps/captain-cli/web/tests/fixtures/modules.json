@@ -1,0 +1,7 @@
+{
+  "modules": [
+    { "module": "captain-daemon", "state": "down", "detail": "daemon is not running", "updated_at_unix_secs": 1760000000 },
+    { "module": "zalo-bridge", "state": "down", "detail": "zalo bridge is not running", "updated_at_unix_secs": 1760000000 },
+    { "module": "bridge", "state": "unknown", "detail": "not wired", "updated_at_unix_secs": 1760000000 }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "rows": [
+    {
+      "source": "telegram",
+      "title": "Release room",
+      "external_id": "-1001897450231",
+      "kind": "group",
+      "messages_7d": [12, 0, 40, 80, 20, 90, 120],
+      "last_activity_unix_secs": 1760000000,
+      "open_tickets": 1,
+      "tag": "work"
+    },
+    {
+      "source": "zalo",
+      "title": "Anh Hùng (DM)",
+      "external_id": "5518…8273",
+      "kind": "dm",
+      "messages_7d": [0, 0, 0, 0, 0, 0, 0],
+      "last_activity_unix_secs": null,
+      "open_tickets": 0,
+      "tag": null
+    }
+  ],
+  "total": 2
+}

@@ -1,0 +1,31 @@
+{
+  "kpi": {
+    "messages_24h": [
+      { "source": "telegram", "messages": 1012 },
+      { "source": "zalo", "messages": 272 }
+    ],
+    "needs_attention": 9,
+    "response_p50_minutes": 18,
+    "response_sample": 187,
+    "conversations": [
+      { "source": "telegram", "active": 31, "watched": 119 },
+      { "source": "zalo", "active": 15, "watched": 41 }
+    ],
+    "module_summary": { "ok": 2, "degraded": 0, "down": 0, "unknown": 1 }
+  },
+  "series": [
+    { "day": 20370, "source": "telegram", "messages": 40 },
+    { "day": 20370, "source": "zalo", "messages": 12 },
+    { "day": 20369, "source": "telegram", "messages": 8 },
+    { "day": 20369, "source": "zalo", "messages": 0 }
+  ],
+  "needs_attention": [
+    { "source": "telegram", "title": "Backend team", "trigger": "mention", "age_secs": 11520 },
+    { "source": "zalo", "title": "Anh Hùng (DM)", "trigger": "dm_all", "age_secs": 2820 }
+  ],
+  "modules": [
+    { "module": "captain-daemon", "state": "ok", "detail": "", "updated_at_unix_secs": 1760000000 },
+    { "module": "zalo-bridge", "state": "ok", "detail": "", "updated_at_unix_secs": 1760000012 },
+    { "module": "bridge", "state": "unknown", "detail": "not wired", "updated_at_unix_secs": 1760000000 }
+  ]
+}

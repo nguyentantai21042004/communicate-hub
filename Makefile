@@ -1,4 +1,4 @@
-.PHONY: check fmt fmt-check lint test lint-comments build gc
+.PHONY: check fmt fmt-check lint test lint-comments build gc web-test
 
 check: fmt-check lint test lint-comments ## everything CI would run
 	@scripts/target-gc.sh
@@ -24,3 +24,6 @@ build:
 
 gc: ## trim target/ now if it is over the cap
 	scripts/target-gc.sh
+
+web-test: ## pure helpers for the dashboard pages
+	node --test apps/captain-cli/web/tests/*.test.mjs
