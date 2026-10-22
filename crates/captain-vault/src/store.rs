@@ -29,8 +29,16 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, entry: &str) -> Result<()>;
 }
 
-/// Keychain service every entry is filed under, visible in Keychain Access.
+/// Keychain service every Captain entry is filed under, visible in Keychain Access.
 pub const KEYCHAIN_SERVICE: &str = "dev.tantai.telegram-captain";
+
+/// Keychain service for the bridge bot token. It is not [`KEYCHAIN_SERVICE`].
+pub const HUB_KEYCHAIN_SERVICE: &str = "dev.tantai.comms-hub";
+
+/// Account name of the bot token inside [`HUB_KEYCHAIN_SERVICE`].
+///
+/// Callers prefix it with the profile, for example `default/bot-token`.
+pub const HUB_BOT_TOKEN_ACCOUNT: &str = "bot-token";
 
 /// Secret store backed by the macOS Keychain (or the platform keyring elsewhere).
 ///
@@ -48,6 +56,21 @@ impl KeychainStore {
         Self {
             service: KEYCHAIN_SERVICE.to_owned(),
         }
+    }
+
+    /// Store for the bridge bot token, using [`HUB_KEYCHAIN_SERVICE`].
+    ///
+    /// The account name is [`HUB_BOT_TOKEN_ACCOUNT`]. This is a different Keychain item from
+    /// the MTProto session.
+    pub fn hub_bot() -> Self {
+        Self {
+            service: HUB_KEYCHAIN_SERVICE.to_owned(),
+        }
+    }
+
+    /// Keychain service this store writes.
+    pub fn service_name(&self) -> &str {
+        &self.service
     }
 
     fn entry(&self, name: &str) -> Result<keyring::Entry> {
@@ -125,5 +148,21 @@ impl SecretStore for MemoryStore {
     fn delete(&self, entry: &str) -> Result<()> {
         self.map().remove(entry);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hub_bot_service_is_separate_from_the_session() {
+        assert_ne!(HUB_KEYCHAIN_SERVICE, KEYCHAIN_SERVICE);
+        assert_eq!(
+            KeychainStore::hub_bot().service_name(),
+            HUB_KEYCHAIN_SERVICE
+        );
+        assert_eq!(KeychainStore::new().service_name(), KEYCHAIN_SERVICE);
+        assert_eq!(HUB_BOT_TOKEN_ACCOUNT, "bot-token");
     }
 }

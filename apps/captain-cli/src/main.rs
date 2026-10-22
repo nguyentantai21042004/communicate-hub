@@ -9,7 +9,12 @@
 
 mod app;
 mod daemon;
+mod dashboard;
 mod demo;
+mod hub;
+mod hub_config;
+mod hub_map;
+mod hub_run;
 mod ipc_server;
 mod jobs;
 mod paths;
@@ -35,6 +40,7 @@ use captain_protocol::Connection;
 use captain_store::Store;
 use captain_vault::{ApiCredentials, KeychainStore, Profile, Secret, Vault};
 use clap::{Args, Parser, Subcommand};
+use hub_store::Hub;
 use serde_json::{Value, json};
 use tracing_appender::rolling::Rotation;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -158,6 +164,9 @@ enum Command {
         #[arg(long)]
         open: bool,
     },
+    /// Run the Zalo bridge. This process does not hold the Captain session.
+    #[command(subcommand)]
+    Hub(hub::HubCommand),
     /// Development helpers.
     #[command(subcommand, hide = true)]
     Dev(DevCommand),
@@ -291,13 +300,18 @@ struct SendArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let default_filter = if matches!(cli.command, Command::Daemon { .. }) {
+    let default_filter = if matches!(
+        cli.command,
+        Command::Daemon { .. } | Command::Hub(hub::HubCommand::Run { .. })
+    ) {
         DAEMON_LOG_FILTER
     } else {
         DEFAULT_LOG_FILTER
     };
     let log_dir = match &cli.command {
-        Command::Daemon { log_dir } => log_dir.as_deref(),
+        Command::Daemon { log_dir } | Command::Hub(hub::HubCommand::Run { log_dir }) => {
+            log_dir.as_deref()
+        }
         _ => None,
     };
     if let Some(dir) = log_dir {
@@ -460,13 +474,16 @@ async fn main() -> Result<()> {
             command: None,
             open,
         } => ui(&paths, open).await,
+        Command::Hub(command) => hub::execute(command, &paths, vault.profile()).await,
         Command::Dev(DevCommand::SeedDemo) => {
             if cli.state_dir.is_none() {
                 bail!("seed-demo writes made-up data; give it an empty --state-dir");
             }
-            let seeded = demo::seed(&Store::open(&paths.store())?, now_unix())?;
+            let store = Store::open(&paths.store())?;
+            let mut hub = Hub::open(&paths.store())?;
+            let seeded = demo::seed(&store, &mut hub, now_unix())?;
             if !paths.scope().exists() {
-                std::fs::write(paths.scope(), demo::SCOPE_TOML)?;
+                std::fs::write(paths.scope(), demo::scope_document())?;
             }
             emit(&json!({ "store": paths.store(), "scope": paths.scope(), "tickets": seeded }))
         }

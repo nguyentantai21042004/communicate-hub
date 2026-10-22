@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Writes a launchd LaunchAgent for `captain hub run`.
+#
+#   scripts/install-hub-agent.sh [--profile NAME] [--binary PATH] [--dry-run]
+#
+# The label is dev.tantai.comms-hub.bridge. Logs go to ~/Library/Logs/comms-hub.
+# The script writes the plist and does not bootstrap it. --dry-run prints the plist
+# and the launchctl commands, and writes nothing. The owner runs launchctl.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROFILE="default"
+BINARY="$ROOT/target/release/captain"
+DRY=0
+LABEL="dev.tantai.comms-hub.bridge"
+LOG_DIR="$HOME/Library/Logs/comms-hub"
+THROTTLE_SECS=30
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="$2"; shift 2 ;;
+    --binary) BINARY="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+render_plist() {
+  cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BINARY</string>
+    <string>--profile</string><string>$PROFILE</string>
+    <string>hub</string>
+    <string>run</string>
+    <string>--log-dir</string><string>$LOG_DIR</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>$THROTTLE_SECS</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$LOG_DIR/bridge.stdout.log</string>
+  <key>StandardErrorPath</key><string>$LOG_DIR/bridge.stderr.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+if [ "$DRY" -eq 1 ]; then
+  render_plist
+  echo "launchctl bootstrap $DOMAIN $PLIST"
+  echo "launchctl bootout $DOMAIN/$LABEL"
+  tmp="$(mktemp)"
+  render_plist > "$tmp"
+  plutil -lint "$tmp"
+  rm -f "$tmp"
+  exit 0
+fi
+
+if [ ! -x "$BINARY" ]; then
+  echo "no captain binary at $BINARY; run 'make build' or pass --binary" >&2
+  exit 1
+fi
+
+mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+chmod 700 "$LOG_DIR"
+render_plist > "$PLIST"
+plutil -lint "$PLIST" >/dev/null
+echo "wrote $PLIST"
+echo "not started. bootstrap it with: launchctl bootstrap $DOMAIN $PLIST"
+echo "stop it with: launchctl bootout $DOMAIN/$LABEL"

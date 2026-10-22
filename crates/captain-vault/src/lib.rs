@@ -15,5 +15,7 @@ pub use error::{Error, Result};
 pub use fs::write_private;
 pub use profile::Profile;
 pub use secret::Secret;
-pub use store::{KeychainStore, MemoryStore, SecretStore};
+pub use store::{
+    HUB_BOT_TOKEN_ACCOUNT, HUB_KEYCHAIN_SERVICE, KeychainStore, MemoryStore, SecretStore,
+};
 pub use vault::{ApiCredentials, Vault};
