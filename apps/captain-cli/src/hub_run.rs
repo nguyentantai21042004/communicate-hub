@@ -35,7 +35,15 @@ const ZALO_DIR: &str = "zalo";
 const CREDENTIALS_FILE: &str = "credentials.json";
 const OFFSET_KEY: &str = "hub_bot_update_offset";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
+// Background wakeups cost battery on a laptop, so production ticks are slow: the sidecar phase
+// and its events already wake the loop immediately, and the poll only catches bridge changes.
+#[cfg(not(test))]
+const HEALTH_INTERVAL: Duration = Duration::from_secs(60);
+#[cfg(test)]
 const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
+#[cfg(not(test))]
+const STATE_POLL: Duration = Duration::from_secs(30);
+#[cfg(test)]
 const STATE_POLL: Duration = Duration::from_secs(1);
 const PRUNE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const ALBUM_WAIT: Duration = Duration::from_millis(400);
