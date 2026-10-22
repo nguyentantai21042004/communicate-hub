@@ -1,0 +1,22 @@
+[package]
+name = "hub-tgbot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Pinned to one minor: frankenstein is pre-1.0 and tracks Bot API releases.
+frankenstein = { version = "0.52", default-features = false, features = ["client-reqwest"] }
+hub-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+
+[lints]
+workspace = true
