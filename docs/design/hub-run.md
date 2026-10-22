@@ -114,3 +114,13 @@ title change is one `editForumTopic`, at most once per conversation per 24 hours
 (`BACKFILL_RENAME_CAP`), with 3 seconds between them (`BACKFILL_RENAME_GAP_SECS`). The wait
 ends with the pass. There is no new timer. The idle loop is still the 30 second state tick,
 the 60 second health tick, and the hourly prune.
+
+## Dashboard agent
+
+`scripts/install-hub-agent.sh --ui` writes `dev.tantai.comms-hub.ui`, which runs
+`captain ui serve --attach` on port 8788. It is read-only, takes no lock and never opens
+Telegram, so it runs beside the old daemon and the hub, and also when the daemon is off
+(the Telegram card then reads "offline"). `scripts/open-ui.sh` opens it signed in on
+`http://hub.localhost:8788/`. The token comes from the profile's `ui_token` file and is not
+printed; `ui.stdout.log` does contain the sign-in URL, so keep `~/Library/Logs/comms-hub` at
+mode 700.
