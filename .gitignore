@@ -11,3 +11,7 @@ __pycache__/
 .env
 *.env
 /.claude/settings.local.json
+
+# Zalo sidecar build artifacts
+/sidecars/*/node_modules/
+/sidecars/*/dist/

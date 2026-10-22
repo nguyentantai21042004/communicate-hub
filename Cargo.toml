@@ -17,6 +17,13 @@ captain-ipc = { path = "crates/captain-ipc" }
 captain-protocol = { path = "crates/captain-protocol" }
 captain-store = { path = "crates/captain-store" }
 captain-vault = { path = "crates/captain-vault" }
+hub-analytics = { path = "crates/hub-analytics" }
+hub-bridge = { path = "crates/hub-bridge" }
+hub-core = { path = "crates/hub-core" }
+hub-store = { path = "crates/hub-store" }
+hub-tgbot = { path = "crates/hub-tgbot" }
+hub-web = { path = "crates/hub-web" }
+hub-zalo = { path = "crates/hub-zalo" }
 
 # Pinned to one minor: grammers is pre-1.0 and breaks between 0.x releases.
 grammers-client = { version = "=0.10.0", default-features = false, features = ["fs"] }
