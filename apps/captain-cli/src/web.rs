@@ -44,6 +44,7 @@ pub const ALLOWED_HOST_NAMES: &[&str] = &[DEFAULT_UI_HOST, LOCALHOST_NAME, FRIEN
 const ATTACH_READ_ONLY: &str = "read-only attach mode";
 
 const COOKIE_NAME: &str = "captain_ui";
+const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60; // the longest lifetime browsers keep; one sign-in per browser
 const CSRF_HEADER: &str = "x-captain";
 const TOKEN_QUERY: &str = "token";
 const SECS_PER_DAY: i64 = 86_400;
@@ -337,7 +338,9 @@ async fn index(
         if !same(token.as_bytes(), web.token.as_bytes()) {
             return (StatusCode::UNAUTHORIZED, html(LOCKED_HTML)).into_response();
         }
-        let cookie = format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict");
+        let cookie = format!(
+            "{COOKIE_NAME}={token}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}; HttpOnly; SameSite=Strict"
+        );
         let mut response = Redirect::to("/").into_response();
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response.headers_mut().insert(header::SET_COOKIE, value);
@@ -1119,6 +1122,10 @@ triggers = [\"dm_all\"]
         assert!(cookie.starts_with(&format!("{COOKIE_NAME}={TOKEN}")));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
+        assert!(
+            cookie.contains("Max-Age="),
+            "the cookie must outlive the browser session: {cookie}"
+        );
         assert!(!cookie.to_ascii_lowercase().contains("domain="));
 
         let signed_in = call(
