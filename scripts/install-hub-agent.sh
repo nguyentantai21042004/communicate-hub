@@ -15,6 +15,9 @@ DRY=0
 LABEL="dev.tantai.comms-hub.bridge"
 LOG_DIR="$HOME/Library/Logs/comms-hub"
 THROTTLE_SECS=30
+# launchd starts agents with a minimal PATH, so the sidecar would not find `node` (nvm) or `ffmpeg`.
+NODE_DIR="$(dirname "$(command -v node 2>/dev/null || echo /usr/local/bin/node)")"
+AGENT_PATH="$NODE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,6 +46,8 @@ render_plist() {
     <string>run</string>
     <string>--log-dir</string><string>$LOG_DIR</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$AGENT_PATH</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>$THROTTLE_SECS</integer>
