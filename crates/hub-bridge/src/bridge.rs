@@ -7,7 +7,7 @@ mod deliver;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hub_core::{
@@ -28,6 +28,7 @@ const LIFE_IDLE: u8 = 0;
 const LIFE_RUNNING: u8 = 1;
 const LIFE_STOPPED: u8 = 2;
 const OPS_LANE: &str = "ops";
+const COUNT_WARN_UNSET: i64 = i64::MIN; // no counter-failure warn recorded yet
 
 pub(crate) struct Cache {
     topics: HashMap<ConversationId, TopicId>,
@@ -122,6 +123,7 @@ pub(crate) struct Inner<S, St, C> {
     life: AtomicU8,
     stop: watch::Sender<bool>,
     backfill: tokio::sync::Mutex<()>,
+    count_warn_at: AtomicI64,
 }
 
 /// Routes [`RemoteEvent`]s into forum topics and topic replies back to the source network.
@@ -173,6 +175,7 @@ where
                 life: AtomicU8::new(LIFE_IDLE),
                 stop,
                 backfill: tokio::sync::Mutex::new(()),
+                count_warn_at: AtomicI64::new(COUNT_WARN_UNSET),
             }),
         }
     }

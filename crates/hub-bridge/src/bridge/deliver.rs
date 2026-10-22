@@ -5,6 +5,7 @@
 //! [`TOPIC_RECREATE_LIMIT`] times. A delivery error is stored and the lane moves on.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use hub_core::{
     Attachment, AttachmentKind, AttachmentSource, ConversationId, ConversationKind, DirectoryTitle,
@@ -15,9 +16,11 @@ use hub_core::{
 use crate::error::Result;
 use crate::format::{notice_html, render_caption, render_text_html, topic_title};
 use crate::incoming::TopicIncoming;
+use hub_store::{ContentKind, Direction};
+
 use crate::limits::{
-    AVATAR_CARD_FILE, FALLBACK_TOPIC_NAME, MENTION_MAX_WORDS, RENAME_INTERVAL_SECS,
-    SINK_MAX_ATTEMPTS, TOPIC_RECREATE_LIMIT,
+    AVATAR_CARD_FILE, COUNT_WARN_INTERVAL_SECS, FALLBACK_TOPIC_NAME, MENTION_MAX_WORDS,
+    RENAME_INTERVAL_SECS, SINK_MAX_ATTEMPTS, TOPIC_RECREATE_LIMIT,
 };
 use crate::mention::{ResolvedMention, is_mention_at, next_prefix};
 use crate::reaction::{to_network_reaction, to_telegram_reaction};
@@ -144,6 +147,8 @@ where
         }
         let reply = self.reply_tg(&message).await?;
         let plans = plans_for(&message, reply);
+        let kinds = counted_kinds(&plans);
+        let sent_at = message.sent_at_unix_secs;
         let Some(tg) = self
             .deliver_plans(&message.conversation, &message.sender_display_name, plans)
             .await?
@@ -157,7 +162,10 @@ where
                 tg,
                 self.clock.unix_secs(),
             )
-            .await
+            .await?;
+        self.count_delivered(&message.conversation, Direction::In, &kinds, sent_at)
+            .await;
+        Ok(())
     }
 
     async fn on_edit(&self, edit: RemoteEdit) -> Result<()> {
@@ -437,20 +445,22 @@ where
             Some(tg) => self.store.message_for_telegram(tg).await?,
             None => None,
         };
+        // One accepted adapter send is one row. Inbound albums are counted per sink send.
+        let kind = outgoing_kind(&attachments);
         let Some(reference) = self
             .send_outgoing(conversation, text, attachments, reply_to)
             .await?
         else {
             return Ok(());
         };
+        let at = self.clock.unix_secs();
         self.store
-            .insert_message(
-                conversation,
-                &reference.message_id,
-                tg_message,
-                self.clock.unix_secs(),
-            )
-            .await
+            .insert_message(conversation, &reference.message_id, tg_message, at)
+            .await?;
+        let kinds = [kind];
+        self.count_delivered(conversation, Direction::Out, &kinds, at)
+            .await;
+        Ok(())
     }
 
     async fn on_topic_reaction(
@@ -988,6 +998,44 @@ where
         }
         Ok(out)
     }
+
+    /// Records one bucket per delivered part. A store error leaves the send as completed.
+    async fn count_delivered(
+        &self,
+        conversation: &ConversationId,
+        direction: Direction,
+        kinds: &[ContentKind],
+        at_unix_secs: i64,
+    ) {
+        for kind in kinds {
+            if let Err(error) = self
+                .store
+                .count_message(conversation, direction, *kind, at_unix_secs)
+                .await
+            {
+                self.note_count_failure(conversation, &error);
+            }
+        }
+    }
+
+    /// Logs the first counter failure inside [`COUNT_WARN_INTERVAL_SECS`], then stays quiet.
+    fn note_count_failure(&self, conversation: &ConversationId, error: &crate::error::Error) {
+        let now = self.clock.unix_secs();
+        let previous = self.count_warn_at.load(Ordering::Relaxed);
+        if previous != super::COUNT_WARN_UNSET
+            && now.saturating_sub(previous) < COUNT_WARN_INTERVAL_SECS
+        {
+            return;
+        }
+        if self
+            .count_warn_at
+            .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        tracing::warn!(conversation = %conversation, %error, "message count was not stored");
+    }
 }
 
 fn plans_for(message: &RemoteMessage, reply: Option<TgMessageId>) -> Vec<Plan> {
@@ -1030,6 +1078,44 @@ fn message_id(out: &SinkOut) -> std::result::Result<TgMessageId, CoreError> {
         SinkOut::Topic(_) | SinkOut::Unit => Err(CoreError::Adapter {
             detail: "sink returned an unexpected result".into(),
         }),
+    }
+}
+
+fn counted_kinds(plans: &[Plan]) -> Vec<ContentKind> {
+    let mut kinds = Vec::with_capacity(plans.len());
+    for plan in plans {
+        match plan {
+            Plan::Text { .. } => kinds.push(ContentKind::Text),
+            Plan::Media { attachments, .. } => {
+                if let Some(attachment) = attachments.first() {
+                    kinds.push(content_kind(attachment.kind));
+                }
+            }
+        }
+    }
+    kinds
+}
+
+fn outgoing_kind(attachments: &[Attachment]) -> ContentKind {
+    match attachments.first() {
+        Some(attachment) => content_kind(attachment.kind),
+        None => ContentKind::Text,
+    }
+}
+
+fn content_kind(kind: AttachmentKind) -> ContentKind {
+    match kind {
+        AttachmentKind::Photo => ContentKind::Photo,
+        AttachmentKind::Video => ContentKind::Video,
+        AttachmentKind::Voice => ContentKind::Voice,
+        AttachmentKind::File => ContentKind::File,
+        AttachmentKind::Sticker => ContentKind::Sticker,
+        AttachmentKind::Poll => ContentKind::Poll,
+        AttachmentKind::BankCard => ContentKind::BankCard,
+        AttachmentKind::Audio
+        | AttachmentKind::Gif
+        | AttachmentKind::Location
+        | AttachmentKind::Contact => ContentKind::Other,
     }
 }
 

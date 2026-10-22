@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use hub_core::{ConversationId, ConversationKind, MessageRef, TgMessageId, TopicId};
+use hub_store::{ContentKind, Direction};
 
 use crate::error::Result;
 use crate::mention::normalize_name;
@@ -246,6 +247,28 @@ pub trait BridgeStore: Send + Sync {
         &self,
         conversation: &ConversationId,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Counts one delivered message in the conversation's UTC hour bucket.
+    ///
+    /// The default writes nothing, so a store that only keeps maps stays valid.
+    /// `direction` is `in` for a remote message that reached Telegram and `out` for a topic
+    /// message the adapter accepted. `at_unix_secs` is the event time when the event carries
+    /// one, otherwise the bridge clock. Call this after the conversation row exists.
+    /// A store error must leave the delivery result untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Store`] when the counter cannot be written. The default returns `Ok(())`.
+    fn count_message(
+        &self,
+        conversation: &ConversationId,
+        direction: Direction,
+        kind: ContentKind,
+        at_unix_secs: i64,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let _ = (self, conversation, direction, kind, at_unix_secs);
+        std::future::ready(Ok(()))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -260,7 +283,25 @@ struct MemoryInner {
     restores: u64,
     avatar_posted: HashSet<ConversationId>,
     #[cfg(test)]
+    counts: Vec<CountedDelivery>,
+    #[cfg(test)]
+    fail_count: bool,
+    #[cfg(test)]
     lookups: Vec<(String, Option<String>)>,
+}
+
+/// One `count_message` call. The fields are the counter columns.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CountedDelivery {
+    /// Conversation the delivery belongs to.
+    pub conversation: ConversationId,
+    /// In or out.
+    pub direction: Direction,
+    /// Payload kind.
+    pub kind: ContentKind,
+    /// Event time, or the bridge clock when the event has none.
+    pub at_unix_secs: i64,
 }
 
 /// In-memory [`BridgeStore`].
@@ -286,6 +327,17 @@ impl MemoryStore {
     #[cfg(test)]
     pub(crate) fn lookup_log(&self) -> Vec<(String, Option<String>)> {
         self.lock().lookups.clone()
+    }
+
+    /// Counter rows recorded by [`BridgeStore::count_message`], in call order.
+    #[cfg(test)]
+    pub(crate) fn counted(&self) -> Vec<CountedDelivery> {
+        self.lock().counts.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_counts(&self, fail: bool) {
+        self.lock().fail_count = fail;
     }
 }
 
@@ -460,6 +512,33 @@ impl BridgeStore for MemoryStore {
 
     async fn mark_avatar_posted(&self, conversation: &ConversationId) -> Result<()> {
         self.lock().avatar_posted.insert(conversation.clone());
+        Ok(())
+    }
+
+    async fn count_message(
+        &self,
+        conversation: &ConversationId,
+        direction: Direction,
+        kind: ContentKind,
+        at_unix_secs: i64,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            let mut inner = self.lock();
+            if inner.fail_count {
+                return Err(crate::error::Error::Store {
+                    detail: "count failed".into(),
+                });
+            }
+            inner.counts.push(CountedDelivery {
+                conversation: conversation.clone(),
+                direction,
+                kind,
+                at_unix_secs,
+            });
+        }
+        #[cfg(not(test))]
+        let _ = (conversation, direction, kind, at_unix_secs);
         Ok(())
     }
 }

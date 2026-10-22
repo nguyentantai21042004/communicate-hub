@@ -5,9 +5,15 @@
 //! front of that same mutex.
 
 use std::path::Path;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 use hub_core::{ConversationId, MessageRef, TgMessageId, TopicId};
-use hub_store::{NewFailure, SharedHub, StoredFailure, StoredTopic};
+use hub_store::{
+    ContentKind, CountedMessage, Direction, NewFailure, SharedHub, StoredFailure, StoredTopic,
+};
 
 use crate::error::{Error, Result};
 use crate::limits::AVATAR_CARD_SETTING_PREFIX;
@@ -26,12 +32,24 @@ const MESSAGE_OWNED: &str = "network message id is owned by another conversation
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     hub: SharedHub,
+    #[cfg(test)]
+    fail_count: Arc<AtomicBool>,
 }
 
 impl SqliteStore {
     /// Wraps an open hub.
     pub fn new(hub: SharedHub) -> Self {
-        Self { hub }
+        Self {
+            hub,
+            #[cfg(test)]
+            fail_count: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_counts(&self, fail: bool) {
+        self.fail_count
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Opens `path` with [`SharedHub::open`](hub_store::SharedHub::open).
@@ -296,6 +314,33 @@ impl BridgeStore for SqliteStore {
         })
         .await
     }
+
+    async fn count_message(
+        &self,
+        conversation: &ConversationId,
+        direction: Direction,
+        kind: ContentKind,
+        at_unix_secs: i64,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_count.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::Store {
+                detail: "count failed".into(),
+            });
+        }
+        let conversation = conversation.clone();
+        let hub = self.hub.clone();
+        call(hub, move |hub| {
+            hub.record_message(&CountedMessage {
+                conversation,
+                at_unix_secs,
+                direction,
+                content_kind: kind,
+            })?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 fn avatar_key(conversation: &ConversationId) -> String {
@@ -480,5 +525,44 @@ mod tests {
         assert!(store.topic_for(&conversation).await.unwrap().is_some());
         store.remove_topic(&conversation).await.unwrap();
         assert!(store.topic_for(&conversation).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn count_message_writes_a_bucket_after_the_conversation_exists() {
+        let tmp = Tmp::new();
+        let store = SqliteStore::open(&tmp.file()).unwrap();
+        let conversation = group("room");
+        let missing = store
+            .count_message(&conversation, Direction::In, ContentKind::Text, 3_600)
+            .await;
+        assert!(matches!(missing, Err(Error::Store { .. })));
+        store
+            .upsert_topic(TopicMapping {
+                conversation: conversation.clone(),
+                topic: TopicId(9),
+                title: "Room".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .count_message(&conversation, Direction::In, ContentKind::Voice, 3_600)
+            .await
+            .unwrap();
+        store
+            .count_message(&conversation, Direction::In, ContentKind::Voice, 3_600)
+            .await
+            .unwrap();
+        let rows = store
+            .hub()
+            .lock()
+            .reader()
+            .counters_between_days(0, 10_000)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].direction, Direction::In);
+        assert_eq!(rows[0].content_kind, ContentKind::Voice);
+        assert_eq!(rows[0].count, 2);
+        assert_eq!(rows[0].hour, 1);
+        assert_eq!(rows[0].day, 0);
     }
 }

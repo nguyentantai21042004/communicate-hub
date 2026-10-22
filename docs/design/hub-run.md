@@ -112,7 +112,10 @@ and one `pinChatMessage` run once per conversation (`avatar_card`, default true)
 title change is one `editForumTopic`, at most once per conversation per 24 hours
 (`RENAME_INTERVAL_SECS`). One backfill pass runs per directory refresh, at most 20 renames
 (`BACKFILL_RENAME_CAP`), with 3 seconds between them (`BACKFILL_RENAME_GAP_SECS`). The wait
-ends with the pass. There is no new timer. The idle loop is still the 30 second state tick,
+ends with the pass. A delivered message increments one `message_counters` bucket on that
+same store path, one statement per posted part. A failed increment logs one warn per 60
+seconds (`COUNT_WARN_INTERVAL_SECS`) and the delivery is left as it completed. There is no
+new timer. The idle loop is still the 30 second state tick,
 the 60 second health tick, and the hourly prune.
 
 ## Dashboard agent

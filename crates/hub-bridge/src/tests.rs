@@ -11,15 +11,17 @@ use hub_core::{
     MessageRef, ModuleHealth, ModuleState, Network, NetworkAdapter, OutgoingMessage, RemoteEdit,
     RemoteEvent, RemoteMessage, SessionState, TopicSink,
 };
+use hub_store::{ContentKind, Direction};
 use tokio::sync::{oneshot, watch};
 
 use crate::limits::{
     AVATAR_CARD_FILE, RENAME_INTERVAL_SECS, SINK_MAX_ATTEMPTS, TOPIC_CONCURRENCY,
     TOPIC_RECREATE_LIMIT,
 };
+use crate::store::CountedDelivery;
 use crate::{
-    Bridge, BridgeConfig, BridgeStore, Error, ManualClock, MemoryStore, TgMessageId, TopicId,
-    TopicIncoming, TopicMapping,
+    Bridge, BridgeConfig, BridgeStore, Error, ManualClock, MemoryStore, SqliteStore, TgMessageId,
+    TopicId, TopicIncoming, TopicMapping,
 };
 
 const START_UNIX_SECS: i64 = 1_700_000_000;
@@ -444,6 +446,7 @@ struct AdapterState {
     unsent: Vec<MessageRef>,
     next_id: u64,
     reads: u64,
+    send_errors_left: u32,
     probe: Option<MemoryStore>,
     restores_at_subscribe: Option<u64>,
 }
@@ -465,6 +468,7 @@ impl FakeAdapter {
                 unsent: Vec::new(),
                 next_id: 0,
                 reads: 0,
+                send_errors_left: 0,
                 probe: None,
                 restores_at_subscribe: None,
             })),
@@ -487,6 +491,10 @@ impl FakeAdapter {
 
     fn restores_seen(&self) -> Option<u64> {
         self.lock().restores_at_subscribe
+    }
+
+    fn set_send_errors(&self, left: u32) {
+        self.lock().send_errors_left = left;
     }
 
     fn sent(&self) -> Vec<OutgoingMessage> {
@@ -518,6 +526,12 @@ impl NetworkAdapter for FakeAdapter {
 
     async fn send(&self, message: OutgoingMessage) -> hub_core::Result<MessageRef> {
         let mut state = self.lock();
+        if state.send_errors_left > 0 {
+            state.send_errors_left -= 1;
+            return Err(hub_core::Error::Adapter {
+                detail: "send failed".into(),
+            });
+        }
         state.next_id += 1;
         let reference = MessageRef {
             conversation: message.conversation.clone(),
@@ -1851,4 +1865,381 @@ async fn unsupported_rename_is_not_a_failure() {
         store.title(&conversation).await.unwrap().as_deref(),
         Some("An")
     );
+}
+
+const BODY: &str = "counter-body-secret";
+const OUT_BODY: &str = "counter-out-secret";
+const EDIT_BODY: &str = "counter-edit-secret";
+const SENT_AT: i64 = START_UNIX_SECS + 3_600;
+const OUT_AT: i64 = START_UNIX_SECS + 7_200;
+
+fn counted_message(id: &str, text: &str, attachments: Vec<Attachment>) -> RemoteEvent {
+    RemoteEvent::Message(RemoteMessage {
+        conversation: zalo_dm("a"),
+        message_id: id.into(),
+        sender_id: "id-An".into(),
+        sender_display_name: "An".into(),
+        text: text.into(),
+        attachments,
+        reply_to: None,
+        sent_at_unix_secs: SENT_AT,
+        mentions: Vec::new(),
+    })
+}
+
+fn file_attachment(kind: AttachmentKind, name: &str) -> Attachment {
+    Attachment {
+        kind,
+        mime: None,
+        size_bytes: Some(4),
+        source: AttachmentSource::Url(format!("https://cdn.example/{name}")),
+        file_name: Some(name.into()),
+    }
+}
+
+async fn exercise_counts<St>(
+    bridge: &Bridge<FakeSink, St, ManualClock>,
+    sink: &FakeSink,
+    adapter: &FakeAdapter,
+    clock: &ManualClock,
+) where
+    St: BridgeStore + 'static,
+{
+    bridge
+        .handle_remote(counted_message("m-text", BODY, Vec::new()))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(counted_message("m-text", BODY, Vec::new()))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(counted_message(
+            "m-photo",
+            "caption",
+            vec![photo("https://cdn.example/one.jpg")],
+        ))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(counted_message(
+            "m-album",
+            "album",
+            vec![
+                photo("https://cdn.example/1.jpg"),
+                photo("https://cdn.example/2.jpg"),
+                photo("https://cdn.example/3.jpg"),
+            ],
+        ))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(counted_message(
+            "m-voice",
+            "",
+            vec![file_attachment(AttachmentKind::Voice, "note.ogg")],
+        ))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(counted_message(
+            "m-sticker",
+            "",
+            vec![file_attachment(AttachmentKind::Sticker, "smile.webp")],
+        ))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(RemoteEvent::Edit(RemoteEdit {
+            target: MessageRef {
+                conversation: zalo_dm("a"),
+                message_id: "m-text".into(),
+            },
+            text: EDIT_BODY.into(),
+            attachments: Vec::new(),
+            edited_at_unix_secs: SENT_AT,
+        }))
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(RemoteEvent::Reaction {
+            target: MessageRef {
+                conversation: zalo_dm("a"),
+                message_id: "m-text".into(),
+            },
+            emoji: "/-heart".into(),
+            added: true,
+        })
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(RemoteEvent::GroupEvent {
+            conversation: zalo_dm("a"),
+            text: "An joined".into(),
+            sent_at_unix_secs: SENT_AT,
+        })
+        .await
+        .unwrap();
+    bridge
+        .handle_remote(RemoteEvent::Unsend {
+            target: MessageRef {
+                conversation: zalo_dm("a"),
+                message_id: "m-photo".into(),
+            },
+        })
+        .await
+        .unwrap();
+    sink.set_send_errors(1);
+    bridge
+        .handle_remote(counted_message("m-fail", "nope", Vec::new()))
+        .await
+        .unwrap();
+    let topic = sink.titles()[0].0;
+    clock.advance(7_200);
+    bridge
+        .handle_topic_message(TopicIncoming::Message {
+            topic,
+            tg_message: TgMessageId(50),
+            text: OUT_BODY.into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        })
+        .await
+        .unwrap();
+    bridge
+        .handle_topic_message(TopicIncoming::Edit {
+            topic,
+            tg_message: TgMessageId(50),
+            text: EDIT_BODY.into(),
+        })
+        .await
+        .unwrap();
+    adapter.set_send_errors(1);
+    bridge
+        .handle_topic_message(TopicIncoming::Message {
+            topic,
+            tg_message: TgMessageId(51),
+            text: "lost".into(),
+            attachments: Vec::new(),
+            reply_to: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(sink.media().len(), 6);
+    assert_eq!(adapter.sent().len(), 2);
+}
+
+async fn deliver_despite_count_failure<St>(
+    bridge: &Bridge<FakeSink, St, ManualClock>,
+    sink: &FakeSink,
+    store: &St,
+) where
+    St: BridgeStore + 'static,
+{
+    let failures = store.failures().await.unwrap().len();
+    let texts = sink.texts().len();
+    bridge
+        .handle_remote(counted_message("m-after", BODY, Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(sink.texts().len(), texts + 1);
+    assert!(
+        store
+            .message_for_network(&zalo_dm("a"), "m-after")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.failures().await.unwrap().len(), failures);
+    assert!(
+        store
+            .message_for_network(&zalo_dm("a"), "m-fail")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+fn expected_counts() -> Vec<CountedDelivery> {
+    let row = |direction, kind, at| CountedDelivery {
+        conversation: zalo_dm("a"),
+        direction,
+        kind,
+        at_unix_secs: at,
+    };
+    vec![
+        row(Direction::In, ContentKind::Text, SENT_AT),
+        row(Direction::In, ContentKind::Photo, SENT_AT),
+        row(Direction::In, ContentKind::Photo, SENT_AT),
+        row(Direction::In, ContentKind::Photo, SENT_AT),
+        row(Direction::In, ContentKind::Photo, SENT_AT),
+        row(Direction::In, ContentKind::Voice, SENT_AT),
+        row(Direction::In, ContentKind::Sticker, SENT_AT),
+        row(Direction::Out, ContentKind::Text, OUT_AT),
+    ]
+}
+
+fn bucket(at: i64) -> (i64, u8) {
+    let day = at.div_euclid(hub_store::limits::SECS_PER_DAY);
+    let hour = at
+        .div_euclid(hub_store::limits::SECS_PER_HOUR)
+        .rem_euclid(24);
+    (day, u8::try_from(hour).unwrap())
+}
+
+fn assert_sqlite_buckets(store: &SqliteStore) {
+    let rows = store
+        .hub()
+        .lock()
+        .reader()
+        .counters_between_days(0, 100_000)
+        .unwrap();
+    let dumped = format!("{rows:?}");
+    assert!(!dumped.contains(BODY), "{dumped}");
+    assert!(!dumped.contains(OUT_BODY), "{dumped}");
+    assert!(!dumped.contains(EDIT_BODY), "{dumped}");
+    let (day, hour) = bucket(SENT_AT);
+    let (out_day, out_hour) = bucket(OUT_AT);
+    let (clock_day, clock_hour) = bucket(START_UNIX_SECS);
+    let count = |direction, kind, row_day, row_hour| -> u64 {
+        rows.iter()
+            .filter(|row| {
+                row.direction == direction
+                    && row.content_kind == kind
+                    && row.day == row_day
+                    && row.hour == row_hour
+            })
+            .map(|row| row.count)
+            .sum()
+    };
+    assert_eq!(count(Direction::In, ContentKind::Text, day, hour), 1);
+    assert_eq!(count(Direction::In, ContentKind::Photo, day, hour), 4);
+    assert_eq!(count(Direction::In, ContentKind::Voice, day, hour), 1);
+    assert_eq!(count(Direction::In, ContentKind::Sticker, day, hour), 1);
+    assert_eq!(
+        count(Direction::Out, ContentKind::Text, out_day, out_hour),
+        1
+    );
+    assert_eq!(
+        count(Direction::In, ContentKind::Text, clock_day, clock_hour),
+        0
+    );
+    assert_eq!(rows.iter().map(|row| row.count).sum::<u64>(), 8);
+}
+
+fn counter_columns(path: &std::path::Path) -> Vec<String> {
+    let bytes = std::fs::read(path).unwrap();
+    let sql = String::from_utf8_lossy(&bytes);
+    let start = sql.find("CREATE TABLE message_counters").unwrap();
+    let rest = &sql[start..];
+    let end = rest.find("PRIMARY KEY").unwrap();
+    rest[..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim().trim_matches(|c: char| c == '(' || c == ')');
+            let name = trimmed.split_whitespace().next()?;
+            if name.eq_ignore_ascii_case("create")
+                || name.eq_ignore_ascii_case("primary")
+                || name.eq_ignore_ascii_case("constraint")
+            {
+                return None;
+            }
+            Some(name.trim_matches(',').to_owned())
+        })
+        .collect()
+}
+
+fn assert_file_lacks(path: &std::path::Path, secret: &str) {
+    let needle = secret.as_bytes();
+    let main = std::fs::read(path).unwrap();
+    assert!(
+        !main.windows(needle.len()).any(|window| window == needle),
+        "database stored message text"
+    );
+    for suffix in ["-wal", "-shm"] {
+        let side = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        let Ok(bytes) = std::fs::read(&side) else {
+            continue;
+        };
+        assert!(
+            !bytes.windows(needle.len()).any(|window| window == needle),
+            "{side:?} stored message text"
+        );
+    }
+}
+
+struct CountDir(std::path::PathBuf);
+
+impl CountDir {
+    fn new() -> Self {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("hub-bridge-count-{}-{n}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn file(&self) -> std::path::PathBuf {
+        self.0.join("inbox.sqlite")
+    }
+}
+
+impl Drop for CountDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn memory_store_counts_only_delivered_messages() {
+    let h = harness();
+    exercise_counts(&h.bridge, &h.sink, &h.adapter, &h.clock).await;
+    let counts = h.store.counted();
+    assert_eq!(counts, expected_counts());
+    let dumped = format!("{counts:?}");
+    assert!(!dumped.contains(BODY));
+    assert!(!dumped.contains(OUT_BODY));
+    assert!(!dumped.contains(EDIT_BODY));
+    h.store.fail_counts(true);
+    deliver_despite_count_failure(&h.bridge, &h.sink, &h.store).await;
+    assert_eq!(h.store.counted(), counts);
+}
+
+#[tokio::test]
+async fn sqlite_store_counts_only_delivered_messages() {
+    let tmp = CountDir::new();
+    let path = tmp.file();
+    let sink = FakeSink::new();
+    let store = SqliteStore::open(&path).unwrap();
+    let clock = ManualClock::new(START_UNIX_SECS);
+    let adapter = FakeAdapter::new(Network::Zalo);
+    let bridge = Bridge::new(
+        BridgeConfig::default(),
+        vec![Box::new(adapter.clone())],
+        sink.clone(),
+        store.clone(),
+        clock.clone(),
+    );
+    exercise_counts(&bridge, &sink, &adapter, &clock).await;
+    assert_sqlite_buckets(&store);
+    store.fail_counts(true);
+    deliver_despite_count_failure(&bridge, &sink, &store).await;
+    assert_sqlite_buckets(&store);
+    drop(bridge);
+    drop(store);
+    assert_eq!(
+        counter_columns(&path),
+        [
+            "day",
+            "hour",
+            "conversation_id",
+            "direction",
+            "content_kind",
+            "count",
+        ]
+    );
+    for secret in [BODY, OUT_BODY, EDIT_BODY] {
+        assert_file_lacks(&path, secret);
+    }
 }
