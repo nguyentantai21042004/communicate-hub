@@ -1,10 +1,10 @@
 //! The monitoring UI: a small HTTP server on the loopback interface.
 //!
 //! SECURITY: anything that can reach the port could read tickets, so the server binds to
-//! 127.0.0.1 only, rejects requests whose `Host` is not that address (DNS rebinding), needs
-//! the token from `captain ui` as a cookie, and needs a custom header on every POST, which a
-//! cross-site form cannot set. Message text only leaves the server when a ticket is opened
-//! with `text=1`.
+//! 127.0.0.1 only, rejects requests whose `Host` is not a name on [`ALLOWED_HOST_NAMES`] with
+//! this port (DNS rebinding), needs the token from `captain ui` as a cookie, and needs a
+//! custom header on every POST, which a cross-site form cannot set. Message text only leaves
+//! the server when a ticket is opened with `text=1`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -31,6 +31,16 @@ pub const DEFAULT_PORT: u16 = 8787;
 pub const DEFAULT_ATTACH_PORT: u16 = 8788;
 /// Overrides [`DEFAULT_PORT`] and [`DEFAULT_ATTACH_PORT`].
 pub const PORT_ENV: &str = "CAPTAIN_UI_PORT";
+/// Hostname printed in sign-in URLs unless `CAPTAIN_UI_HOST` says otherwise.
+pub const DEFAULT_UI_HOST: &str = "127.0.0.1";
+/// Loopback alias browsers resolve without DNS or `/etc/hosts`.
+pub const FRIENDLY_UI_HOST: &str = "hub.localhost";
+const LOCALHOST_NAME: &str = "localhost";
+/// Overrides [`DEFAULT_UI_HOST`] for printed URLs. Must be a name on [`ALLOWED_HOST_NAMES`].
+pub const HOST_ENV: &str = "CAPTAIN_UI_HOST";
+/// Host names accepted in the `Host` header together with `:<port>`. Add a name here
+/// when another loopback alias should work; the server still binds 127.0.0.1 only.
+pub const ALLOWED_HOST_NAMES: &[&str] = &[DEFAULT_UI_HOST, LOCALHOST_NAME, FRIENDLY_UI_HOST];
 const ATTACH_READ_ONLY: &str = "read-only attach mode";
 
 const COOKIE_NAME: &str = "captain_ui";
@@ -58,16 +68,30 @@ const BOOT_JS: &str = include_str!("../web/boot.js");
 /// Where the UI listens.
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
+    /// Hostname used in printed sign-in URLs. The socket still binds 127.0.0.1.
+    pub host: &'static str,
     pub port: u16,
 }
 
 impl Settings {
-    /// Reads `CAPTAIN_UI_PORT`, falling back to [`DEFAULT_PORT`].
+    /// Reads `CAPTAIN_UI_PORT` and `CAPTAIN_UI_HOST`, falling back to [`DEFAULT_PORT`]
+    /// and [`DEFAULT_UI_HOST`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the port is not a number or the host is not on
+    /// [`ALLOWED_HOST_NAMES`].
     pub fn from_env() -> Result<Self> {
         Self::from_env_or(DEFAULT_PORT)
     }
 
-    /// Reads `CAPTAIN_UI_PORT`, falling back to `default`.
+    /// Reads `CAPTAIN_UI_PORT` and `CAPTAIN_UI_HOST`, falling back to `default` and
+    /// [`DEFAULT_UI_HOST`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the port is not a number or the host is not on
+    /// [`ALLOWED_HOST_NAMES`].
     pub fn from_env_or(default: u16) -> Result<Self> {
         let port = match std::env::var(PORT_ENV) {
             Ok(v) => v
@@ -76,17 +100,63 @@ impl Settings {
                 .with_context(|| format!("{PORT_ENV} must be a port number"))?,
             Err(_) => default,
         };
-        Ok(Self { port })
+        let host_env = std::env::var(HOST_ENV).ok();
+        let host = resolve_ui_host(host_env.as_deref())?;
+        Ok(Self { host, port })
     }
 
     pub fn base_url(self) -> String {
-        format!("http://{}:{}/", Ipv4Addr::LOCALHOST, self.port)
+        format!("http://{}:{}/", self.host, self.port)
     }
 
     /// The URL that signs a browser in; `index` trades the query for a cookie.
     pub fn login_url(self, token: &str) -> String {
-        format!("{}?{TOKEN_QUERY}={token}", self.base_url())
+        self.login_url_for(self.host, token)
     }
+
+    /// Sign-in URL for `host` on this port. `host` is a name, not a `Host` header.
+    pub fn login_url_for(self, host: &str, token: &str) -> String {
+        format!("http://{host}:{}/?{TOKEN_QUERY}={token}", self.port)
+    }
+
+    /// Sign-in URLs for [`DEFAULT_UI_HOST`] and [`FRIENDLY_UI_HOST`] on this port.
+    pub fn attach_login_urls(self, token: &str) -> [String; 2] {
+        [
+            self.login_url_for(DEFAULT_UI_HOST, token),
+            self.login_url_for(FRIENDLY_UI_HOST, token),
+        ]
+    }
+}
+
+fn resolve_ui_host(raw: Option<&str>) -> Result<&'static str> {
+    let Some(value) = raw else {
+        return Ok(DEFAULT_UI_HOST);
+    };
+    let lower = value.trim().to_ascii_lowercase();
+    ALLOWED_HOST_NAMES
+        .iter()
+        .copied()
+        .find(|name| *name == lower)
+        .with_context(|| {
+            format!(
+                "{HOST_ENV} must be one of {}",
+                ALLOWED_HOST_NAMES.join(", ")
+            )
+        })
+}
+
+fn allowed_host_headers(port: u16) -> Arc<[String]> {
+    ALLOWED_HOST_NAMES
+        .iter()
+        .map(|name| format!("{name}:{port}"))
+        .collect()
+}
+
+/// Exact match after ASCII lowercase: `Hub.Localhost:8787` matches, a trailing
+/// dot or a missing port does not.
+fn host_is_allowed(header: &str, allowed: &[String]) -> bool {
+    let lower = header.to_ascii_lowercase();
+    allowed.iter().any(|name| name == &lower)
 }
 
 /// Binds the loopback port, failing when it is taken instead of picking another.
@@ -181,11 +251,7 @@ async fn run_server(app: Arc<App>, listener: TcpListener, token: String, read_on
     let state = Web {
         app,
         token: token.into(),
-        hosts: vec![
-            format!("{}:{port}", Ipv4Addr::LOCALHOST),
-            format!("localhost:{port}"),
-        ]
-        .into(),
+        hosts: allowed_host_headers(port),
         read_only,
     };
     tracing::info!(port, "web UI listening on the loopback interface");
@@ -200,7 +266,7 @@ async fn guard(State(web): State<Web>, request: Request, next: Next) -> Response
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok());
-    if !host.is_some_and(|h| web.hosts.iter().any(|allowed| allowed == h)) {
+    if !host.is_some_and(|h| host_is_allowed(h, &web.hosts)) {
         return (StatusCode::FORBIDDEN, "unknown host").into_response();
     }
     if request.method() != Method::GET && !request.headers().contains_key(CSRF_HEADER) {
@@ -437,6 +503,46 @@ triggers = [\"dm_all\"]
 ";
 
     #[test]
+    fn printed_urls_default_to_loopback_and_follow_the_named_host() {
+        let default = Settings {
+            host: DEFAULT_UI_HOST,
+            port: DEFAULT_PORT,
+        };
+        assert_eq!(default.base_url(), "http://127.0.0.1:8787/");
+        assert_eq!(default.login_url("tok"), "http://127.0.0.1:8787/?token=tok");
+        let friendly = Settings {
+            host: FRIENDLY_UI_HOST,
+            port: DEFAULT_ATTACH_PORT,
+        };
+        assert_eq!(
+            friendly.login_url("tok"),
+            "http://hub.localhost:8788/?token=tok"
+        );
+        assert_eq!(
+            friendly.attach_login_urls("tok"),
+            [
+                "http://127.0.0.1:8788/?token=tok".to_owned(),
+                "http://hub.localhost:8788/?token=tok".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_host_must_be_on_the_named_list() {
+        assert_eq!(resolve_ui_host(None).unwrap(), DEFAULT_UI_HOST);
+        assert_eq!(
+            resolve_ui_host(Some("hub.localhost")).unwrap(),
+            FRIENDLY_UI_HOST
+        );
+        assert_eq!(
+            resolve_ui_host(Some(" Hub.Localhost ")).unwrap(),
+            FRIENDLY_UI_HOST
+        );
+        assert!(resolve_ui_host(Some("evil.example")).is_err());
+        assert!(resolve_ui_host(Some("hub.localhost.evil.example")).is_err());
+    }
+
+    #[test]
     fn the_token_must_match_the_cookie_exactly() {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -502,7 +608,7 @@ triggers = [\"dm_all\"]
         Web {
             app,
             token: TOKEN.into(),
-            hosts: vec![HOST.to_owned(), "localhost:8787".to_owned()].into(),
+            hosts: allowed_host_headers(DEFAULT_PORT),
             read_only,
         }
     }
@@ -593,6 +699,18 @@ triggers = [\"dm_all\"]
         .await;
         assert_eq!(bad_host.status, StatusCode::FORBIDDEN);
         assert_eq!(bad_host.body, "unknown host");
+
+        let hub = call(
+            &app,
+            "GET",
+            "/api/status",
+            "hub.localhost:8787",
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(hub.status, StatusCode::OK);
 
         let post = call(
             &app,
@@ -889,6 +1007,31 @@ triggers = [\"dm_all\"]
         assert_eq!(status["read_only"], true);
         assert_eq!(status["connection"], "offline");
 
+        let hub = call_mode(
+            &app,
+            true,
+            "GET",
+            "/api/status",
+            "hub.localhost:8787",
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(hub.status, StatusCode::OK);
+        let evil = call_mode(
+            &app,
+            true,
+            "GET",
+            "/api/status",
+            "evil.example:8787",
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(evil.status, StatusCode::FORBIDDEN);
+
         let overview = call_mode(
             &app,
             true,
@@ -919,6 +1062,76 @@ triggers = [\"dm_all\"]
         }
         drop(app);
         assert_eq!(sqlite_bytes(&store_path), before);
+    }
+
+    #[tokio::test]
+    async fn the_host_guard_accepts_the_named_list_and_rejects_rebinding() {
+        let tmp = TempDir::new("host-guard");
+        let app = test_app(&tmp.0, Scope::default());
+        let accepted = [
+            "127.0.0.1:8787",
+            "localhost:8787",
+            "hub.localhost:8787",
+            "Hub.Localhost:8787",
+            "HUB.LOCALHOST:8787",
+        ];
+        for host in accepted {
+            let reply = call(&app, "GET", "/api/status", host, true, false, None).await;
+            assert_eq!(reply.status, StatusCode::OK, "{host}");
+        }
+        let rejected = [
+            "evil.example:8787",
+            "hub.localhost.evil.example",
+            "hub.localhost.evil.example:8787",
+            "hub.localhost",
+            "hub.localhost.:8787",
+            "hub.localhost.",
+            "hub.localhost:8788",
+        ];
+        for host in rejected {
+            let reply = call(&app, "GET", "/api/status", host, true, false, None).await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{host}");
+            assert_eq!(reply.body, "unknown host", "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_token_cookie_is_host_only_and_signs_hub_localhost_in() {
+        let tmp = TempDir::new("cookie-host");
+        let app = test_app(&tmp.0, Scope::default());
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/?{TOKEN_QUERY}={TOKEN}"))
+            .header(header::HOST, "hub.localhost:8787")
+            .body(Body::empty())
+            .expect("request");
+        let response = router(web_state_mode(Arc::clone(&app), false))
+            .oneshot(request)
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("set-cookie")
+            .to_str()
+            .unwrap();
+        assert!(cookie.starts_with(&format!("{COOKIE_NAME}={TOKEN}")));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(!cookie.to_ascii_lowercase().contains("domain="));
+
+        let signed_in = call(
+            &app,
+            "GET",
+            "/api/status",
+            "hub.localhost:8787",
+            true,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(signed_in.status, StatusCode::OK);
     }
 
     fn sample_message(stamp: i64) -> MessageView {

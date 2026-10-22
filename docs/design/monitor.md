@@ -8,8 +8,10 @@ explicit labels that M5 needs. It sends nothing to Telegram.
 
 ## Where it runs
 
-- The daemon serves it on `127.0.0.1:8787`. `CAPTAIN_UI_PORT` changes the port. A taken port
-  fails the start instead of moving to the next free one, so two servers cannot pile up.
+- The daemon serves it on `127.0.0.1:8787`. `CAPTAIN_UI_PORT` changes the port.
+  `CAPTAIN_UI_HOST=hub.localhost` prints sign-in URLs with that name (default `127.0.0.1`).
+  A taken port fails the start instead of moving to the next free one, so two servers cannot
+  pile up.
 - `captain ui` prints a signed-in address, and `captain ui --open` opens it in the browser.
 - `captain ui serve` shows the same page from the store alone while the daemon is stopped, for
   example to read the report on another copy of the database. It takes the session lock, so it
@@ -18,7 +20,8 @@ explicit labels that M5 needs. It sends nothing to Telegram.
   running daemon and `captain hub run`. It does not take `session.lock` or `hub.lock`, does not
   open Telegram, and does not create or migrate the store. Default port is 8788 (`CAPTAIN_UI_PORT`
   still overrides; a taken port still fails). The token is the existing `ui_token` file; it is
-  not rotated. The daemon's own UI on 8787 is unchanged.
+  not rotated. The printed output includes both `127.0.0.1` and `hub.localhost` sign-in URLs.
+  The daemon's own UI on 8787 is unchanged.
 - The assets are plain HTML, CSS and JavaScript compiled into the binary. There is no build step
   and nothing is fetched from the network.
 
@@ -29,14 +32,19 @@ The page shows who wrote to Tài and when, so it is guarded like the socket:
 | Check | Stops |
 |---|---|
 | Bound to the loopback interface only | Other machines on the network |
-| `Host` must be `127.0.0.1:<port>` or `localhost:<port>` | DNS rebinding from a web page |
+| `Host` must be `127.0.0.1:<port>`, `localhost:<port>`, or `hub.localhost:<port>` | DNS rebinding from a web page |
 | Token cookie on every API call, from `<state dir>/ui_token` (mode `0600`) | Other local users and other browser profiles |
 | `X-Captain` header on every POST | Cross-site form posts; a foreign page cannot set it without a preflight the server never answers |
 | `Content-Security-Policy` with `'self'` only, `frame-ancestors 'none'` | Injected scripts, framing |
 
 `captain ui` builds the address as `/?token=<token>`. The server trades the query for an
-`HttpOnly`, `SameSite=Strict` cookie and redirects to `/`, so the token leaves the address bar
-right away. Deleting `ui_token` signs every browser out; the next `captain ui` makes a new one.
+`HttpOnly`, `SameSite=Strict` cookie (host-only, no `Domain`) and redirects to `/`, so the
+token leaves the address bar right away. `hub.localhost` and `127.0.0.1` are separate cookie
+jars; each sign-in URL sets its own. Deleting `ui_token` signs every browser out; the next
+`captain ui` makes a new one.
+
+Another name such as `hub.tantai.dev` would need an `/etc/hosts` entry (sudo, the owner does
+it) plus adding the name to the const list; exposing the UI beyond loopback is out of scope.
 
 A rejected `Host`, and any POST without `X-Captain`, answers 403. An `/api` call without the
 cookie answers 401 with `{"error": "..."}`.

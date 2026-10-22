@@ -699,18 +699,23 @@ async fn ui_serve(vault: &Vault, paths: &Paths, attach: bool) -> Result<()> {
         web::Settings::from_env()?
     };
     let listener = web::bind(&app, &settings).await?;
-    let url = settings.login_url(&paths.ui_token()?);
-    open_url(&url, false)?;
+    let token = paths.ui_token()?;
+    let url = settings.login_url(&token);
     if attach {
+        emit(&json!({
+            "url": url,
+            "urls": settings.attach_login_urls(&token),
+        }))?;
         tracing::warn!("serving the store read-only; press Ctrl-C to stop");
         tokio::select! {
-            () = web::serve_attach(app, listener, paths.ui_token()?) => {}
+            () = web::serve_attach(app, listener, token) => {}
             _ = tokio::signal::ctrl_c() => {}
         }
     } else {
+        open_url(&url, false)?;
         tracing::warn!("serving the store without Telegram; press Ctrl-C to stop");
         tokio::select! {
-            () = web::serve(app, listener, paths.ui_token()?) => {}
+            () = web::serve(app, listener, token) => {}
             _ = tokio::signal::ctrl_c() => {}
         }
     }
