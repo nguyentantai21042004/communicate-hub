@@ -138,6 +138,7 @@ pub async fn run(vault: Vault, paths: Paths, ui: web::Settings) -> Result<()> {
     tasks.spawn(ipc_server::serve(Arc::clone(&app), socket, owner));
     tasks.spawn(web::serve(Arc::clone(&app), web_listener, token));
     tasks.spawn(jobs::run(Arc::clone(&app), run_id));
+    tasks.spawn(crate::runner::run(Arc::clone(&app)));
     tracing::info!(
         chats = app.config().scope.entries().len(),
         paused,

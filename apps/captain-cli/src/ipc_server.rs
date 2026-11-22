@@ -170,5 +170,17 @@ pub async fn handle(app: &App, request: Request) -> Result<Value> {
         } => app.new_ticket(chat, message, note).await,
         Request::Report { within_secs } => app.report(within_secs).await,
         Request::ScopeReload => app.reload(),
+        Request::Contacts => app.contacts().await,
+        Request::ContactUpsert { spec } => app.upsert_contact(spec).await,
+        Request::DeleteUserHistory { chat, just_clear } => {
+            app.delete_user_history(chat, just_clear).await
+        }
+        Request::Folders => app.folders().await,
+        Request::FolderUpsert { spec } => app.upsert_folder(spec).await,
+        Request::FolderDelete { id } => app.delete_folder(id).await,
+        Request::FolderOrder { order } => app.reorder_folders(order).await,
+        Request::GroupCreate { title, about } => app.create_group(title, about).await,
+        Request::TicketRun { id } => app.run_ticket(id).await,
+        Request::Runs { limit } => app.runs(limit).await,
     }
 }

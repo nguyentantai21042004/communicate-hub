@@ -21,6 +21,8 @@ mod paths;
 mod pipeline;
 mod prompt;
 mod report_text;
+mod runner;
+mod runner_store;
 mod telemetry;
 mod web;
 
@@ -31,8 +33,8 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
 use captain_core::{
-    ChatId, ChatRef, Content, MediaItem, MediaKind, MessageId, OutgoingMessage, PhotoQuality,
-    Protocol, SendOptions,
+    ChatId, ChatRef, ContactUpsert, Content, DialogFolderSpec, MediaItem, MediaKind, MessageId,
+    OutgoingMessage, PhotoQuality, Protocol, SendOptions,
 };
 use captain_format::Syntax;
 use captain_ipc::{Client, Request};
@@ -121,6 +123,34 @@ enum Command {
     Chats {
         /// How many.
         #[arg(long, default_value_t = DEFAULT_CHATS)]
+        limit: usize,
+    },
+    /// List saved Telegram contacts.
+    Contacts,
+    /// Add or rename a contact without notifying the peer.
+    #[command(subcommand)]
+    Contact(ContactCommand),
+    /// Delete our own copy of a private DM history (revoke: false).
+    ChatDelete {
+        /// Target user id or @username.
+        #[arg(long, allow_hyphen_values = true)]
+        chat: String,
+        /// Clear messages while leaving the dialog entry.
+        #[arg(long)]
+        just_clear: bool,
+    },
+    /// List current chat folders (tabs).
+    Folders,
+    /// Create, update, delete, or reorder chat folders.
+    #[command(subcommand)]
+    Folder(FolderCommand),
+    /// Manage private Telegram groups for this account.
+    #[command(subcommand)]
+    Group(GroupCommand),
+    /// List recent AI runner executions.
+    Runs {
+        /// Maximum number of runs to return.
+        #[arg(long, default_value_t = 20)]
         limit: usize,
     },
     /// Search a chat's older messages on Telegram with a regex. Needs the daemon. Matches
@@ -238,6 +268,11 @@ enum TicketCommand {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Run the Codex runner immediately on one ticket id. Needs the daemon.
+    Run {
+        /// Ticket id.
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -246,6 +281,62 @@ enum ScopeCommand {
     Check,
     /// Make the running daemon reread them.
     Reload,
+}
+
+#[derive(Subcommand)]
+enum ContactCommand {
+    /// Add or rename a user in Telegram contacts without notifying them.
+    Set {
+        /// Target user id or @username.
+        #[arg(long, allow_hyphen_values = true)]
+        user: String,
+        /// First name to store.
+        #[arg(long)]
+        first_name: String,
+        /// Last name to store.
+        #[arg(long, default_value = "")]
+        last_name: String,
+        /// Phone override; omit to preserve any saved number or leave blank.
+        #[arg(long)]
+        phone: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCommand {
+    /// Create or replace a custom folder from a folder JSON file or string.
+    Set {
+        /// Path to JSON file.
+        #[arg(long, conflicts_with = "json")]
+        file: Option<PathBuf>,
+        /// Inline JSON string.
+        #[arg(long, conflicts_with = "file")]
+        json: Option<String>,
+    },
+    /// Delete a custom folder by id (>= 2).
+    Delete {
+        /// Folder id.
+        #[arg(long)]
+        id: i32,
+    },
+    /// Set the display order of folder ids (0 represents All Chats).
+    Order {
+        /// Folder ids in order.
+        ids: Vec<i32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupCommand {
+    /// Create a private supergroup owned by this account (no other members).
+    Create {
+        /// Group title.
+        #[arg(long)]
+        title: String,
+        /// Group description.
+        #[arg(long, default_value = "")]
+        about: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -393,6 +484,122 @@ async fn main() -> Result<()> {
             };
             finish(conn, dialogs.map(|d| json!(d))).await
         }
+        Command::Contacts => {
+            if let Some(mut daemon) = daemon(&paths).await? {
+                return emit(&daemon.call(Request::Contacts).await?);
+            }
+            let (_lock, conn) = connect(vault, &paths).await?;
+            let listed = match conn.handle() {
+                Ok(handle) => handle.contacts().await,
+                Err(e) => Err(e),
+            };
+            finish(conn, listed.map(|c| json!(c))).await
+        }
+        Command::Contact(ContactCommand::Set {
+            user,
+            first_name,
+            last_name,
+            phone,
+        }) => {
+            let spec = ContactUpsert {
+                user: user.parse()?,
+                first_name,
+                last_name,
+                phone,
+            };
+            spec.validate()?;
+            if let Some(mut daemon) = daemon(&paths).await? {
+                return emit(&daemon.call(Request::ContactUpsert { spec }).await?);
+            }
+            let (_lock, conn) = connect(vault, &paths).await?;
+            let res = match conn.handle() {
+                Ok(handle) => handle.upsert_contact(spec).await,
+                Err(e) => Err(e),
+            };
+            finish(conn, res.map(|()| json!({ "updated": true }))).await
+        }
+        Command::ChatDelete { chat, just_clear } => {
+            let chat: ChatRef = chat.parse()?;
+            if let Some(mut daemon) = daemon(&paths).await? {
+                return emit(
+                    &daemon
+                        .call(Request::DeleteUserHistory { chat, just_clear })
+                        .await?,
+                );
+            }
+            let (_lock, conn) = connect(vault, &paths).await?;
+            let res = match conn.handle() {
+                Ok(handle) => handle.delete_user_history(&chat, just_clear).await,
+                Err(e) => Err(e),
+            };
+            finish(conn, res.map(|d| json!(d))).await
+        }
+        Command::Folders => {
+            if let Some(mut daemon) = daemon(&paths).await? {
+                return emit(&daemon.call(Request::Folders).await?);
+            }
+            let (_lock, conn) = connect(vault, &paths).await?;
+            let listed = match conn.handle() {
+                Ok(handle) => handle.dialog_folders().await,
+                Err(e) => Err(e),
+            };
+            finish(conn, listed.map(|f| json!(f))).await
+        }
+        Command::Folder(cmd) => match cmd {
+            FolderCommand::Set { file, json: raw } => {
+                let text = match (file, raw) {
+                    (Some(path), None) => std::fs::read_to_string(&path)
+                        .with_context(|| format!("cannot read {}", path.display()))?,
+                    (None, Some(s)) => s,
+                    _ => bail!("pass either --file or --json"),
+                };
+                let spec: DialogFolderSpec = serde_json::from_str(&text)?;
+                spec.validate()?;
+                if let Some(mut daemon) = daemon(&paths).await? {
+                    return emit(&daemon.call(Request::FolderUpsert { spec }).await?);
+                }
+                let (_lock, conn) = connect(vault, &paths).await?;
+                let res = match conn.handle() {
+                    Ok(handle) => handle.upsert_dialog_folder(spec).await,
+                    Err(e) => Err(e),
+                };
+                finish(conn, res.map(|()| json!({ "updated": true }))).await
+            }
+            FolderCommand::Delete { id } => {
+                if let Some(mut daemon) = daemon(&paths).await? {
+                    return emit(&daemon.call(Request::FolderDelete { id }).await?);
+                }
+                let (_lock, conn) = connect(vault, &paths).await?;
+                let res = match conn.handle() {
+                    Ok(handle) => handle.delete_dialog_folder(id).await,
+                    Err(e) => Err(e),
+                };
+                finish(conn, res.map(|()| json!({ "deleted": id }))).await
+            }
+            FolderCommand::Order { ids } => {
+                if let Some(mut daemon) = daemon(&paths).await? {
+                    return emit(&daemon.call(Request::FolderOrder { order: ids }).await?);
+                }
+                let (_lock, conn) = connect(vault, &paths).await?;
+                let res = match conn.handle() {
+                    Ok(handle) => handle.reorder_dialog_folders(ids).await,
+                    Err(e) => Err(e),
+                };
+                finish(conn, res.map(|()| json!({ "reordered": true }))).await
+            }
+        },
+        Command::Group(GroupCommand::Create { title, about }) => {
+            if let Some(mut daemon) = daemon(&paths).await? {
+                return emit(&daemon.call(Request::GroupCreate { title, about }).await?);
+            }
+            let (_lock, conn) = connect(vault, &paths).await?;
+            let res = match conn.handle() {
+                Ok(handle) => handle.create_private_group(title, about).await,
+                Err(e) => Err(e),
+            };
+            finish(conn, res.map(|c| json!(c))).await
+        }
+        Command::Runs { limit } => emit(&call(&vault, &paths, Request::Runs { limit }).await?),
         Command::History {
             chat,
             grep,
@@ -441,6 +648,12 @@ async fn main() -> Result<()> {
                 note,
             };
             emit(&daemon.call(request).await?)
+        }
+        Command::Ticket(TicketCommand::Run { id }) => {
+            let Some(mut daemon) = daemon(&paths).await? else {
+                bail!("running a ticket needs the daemon; start it with `captain daemon`");
+            };
+            emit(&daemon.call(Request::TicketRun { id }).await?)
         }
         Command::Report { days, text } => {
             let request = Request::Report {

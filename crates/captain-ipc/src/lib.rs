@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use captain_core::{ChatId, MessageId, OutgoingMessage};
+use captain_core::{ChatId, ChatRef, ContactUpsert, DialogFolderSpec, MessageId, OutgoingMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -97,6 +97,54 @@ pub enum Request {
     },
     /// Reread `scope.toml` and `policy.toml`.
     ScopeReload,
+    /// List saved Telegram contacts.
+    Contacts,
+    /// Add or rename a contact without notifying the peer.
+    ContactUpsert {
+        /// Contact specification.
+        spec: ContactUpsert,
+    },
+    /// Delete our own copy of a private DM history (`revoke: false`).
+    DeleteUserHistory {
+        /// Target user peer.
+        chat: ChatRef,
+        /// Clear messages while keeping the dialog slot.
+        just_clear: bool,
+    },
+    /// List current chat folders (tabs).
+    Folders,
+    /// Create or replace a custom chat folder.
+    FolderUpsert {
+        /// Folder specification.
+        spec: DialogFolderSpec,
+    },
+    /// Delete a custom chat folder by id.
+    FolderDelete {
+        /// Folder id (`>= 2`).
+        id: i32,
+    },
+    /// Reorder chat folders (`0` represents All Chats).
+    FolderOrder {
+        /// Folder ids in display order.
+        order: Vec<i32>,
+    },
+    /// Create a private supergroup owned by this account.
+    GroupCreate {
+        /// Group title.
+        title: String,
+        /// Optional description.
+        about: String,
+    },
+    /// Run the AI runner immediately on one ticket id.
+    TicketRun {
+        /// Ticket id.
+        id: i64,
+    },
+    /// List recent AI runner executions.
+    Runs {
+        /// Maximum rows to return.
+        limit: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -296,6 +344,30 @@ mod tests {
         let (_, status) = decode_request(r#"{"id":1,"request":{"method":"status"}}"#).unwrap();
         assert_eq!(status, Request::Status);
         assert!(decode_request("{}").is_err());
+
+        for req in [
+            Request::Contacts,
+            Request::Folders,
+            Request::FolderDelete { id: 2 },
+            Request::FolderOrder {
+                order: vec![0, 2, 3],
+            },
+            Request::DeleteUserHistory {
+                chat: ChatRef::Id(ChatId(42)),
+                just_clear: false,
+            },
+        ] {
+            let line = encode_line(&Envelope {
+                id: 9,
+                body: RequestBody {
+                    request: req.clone(),
+                },
+            })
+            .unwrap();
+            let (id, decoded) = decode_request(line.trim_end()).unwrap();
+            assert_eq!(id, 9);
+            assert_eq!(decoded, req);
+        }
     }
 
     #[tokio::test]

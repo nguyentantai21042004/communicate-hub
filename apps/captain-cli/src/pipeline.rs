@@ -174,6 +174,9 @@ impl Pipeline {
             }
             return Ok(());
         }
+        if crate::runner::handle_review_reply(&self.app, &m).await? {
+            return Ok(());
+        }
 
         let config = self.app.config();
         let key = key_of(&m);

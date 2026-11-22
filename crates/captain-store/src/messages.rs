@@ -260,6 +260,38 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Up to `limit` non-deleted messages on `key` at or before `up_to`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Sqlite`] on a read failure.
+    pub fn recent_thread_messages(
+        &self,
+        key: ThreadKey,
+        up_to: MessageId,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        let cap = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages m
+             LEFT JOIN chats s ON s.chat_id = m.sender_id
+             WHERE m.chat_id = ?1
+               AND ((?2 IS NULL AND m.topic_id IS NULL) OR m.topic_id = ?2)
+               AND m.msg_id <= ?3
+               AND m.deleted_at IS NULL
+             ORDER BY m.msg_id DESC
+             LIMIT ?4"
+        ))?;
+        let topic = key.topic.map(|t| t.0);
+        let rows = stmt.query_map(
+            params![key.chat.0, topic, up_to.0, cap],
+            StoredMessage::from_row,
+        )?;
+        let mut out: Vec<StoredMessage> = rows.collect::<rusqlite::Result<_>>()?;
+        out.reverse();
+        Ok(out)
+    }
+
     /// Title of a chat the store has seen.
     ///
     /// # Errors

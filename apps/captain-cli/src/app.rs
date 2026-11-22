@@ -561,6 +561,67 @@ impl App {
         Ok(json!(dialogs))
     }
 
+    pub async fn contacts(&self) -> Result<Value> {
+        let contacts = self.live()?.handle.contacts().await?;
+        Ok(json!(contacts))
+    }
+
+    pub async fn upsert_contact(&self, spec: captain_core::ContactUpsert) -> Result<Value> {
+        self.live()?.handle.upsert_contact(spec).await?;
+        Ok(json!({ "updated": true }))
+    }
+
+    pub async fn delete_user_history(
+        &self,
+        chat: captain_core::ChatRef,
+        just_clear: bool,
+    ) -> Result<Value> {
+        let deleted = self
+            .live()?
+            .handle
+            .delete_user_history(&chat, just_clear)
+            .await?;
+        Ok(json!(deleted))
+    }
+
+    pub async fn folders(&self) -> Result<Value> {
+        let folders = self.live()?.handle.dialog_folders().await?;
+        Ok(json!(folders))
+    }
+
+    pub async fn upsert_folder(&self, spec: captain_core::DialogFolderSpec) -> Result<Value> {
+        self.live()?.handle.upsert_dialog_folder(spec).await?;
+        Ok(json!({ "updated": true }))
+    }
+
+    pub async fn delete_folder(&self, id: i32) -> Result<Value> {
+        self.live()?.handle.delete_dialog_folder(id).await?;
+        Ok(json!({ "deleted": id }))
+    }
+
+    pub async fn reorder_folders(&self, order: Vec<i32>) -> Result<Value> {
+        self.live()?.handle.reorder_dialog_folders(order).await?;
+        Ok(json!({ "reordered": true }))
+    }
+
+    pub async fn create_group(&self, title: String, about: String) -> Result<Value> {
+        let created = self
+            .live()?
+            .handle
+            .create_private_group(title, about)
+            .await?;
+        Ok(json!(created))
+    }
+
+    pub async fn run_ticket(&self, id: i64) -> Result<Value> {
+        crate::runner::run_ticket_now(self, id).await
+    }
+
+    pub async fn runs(&self, limit: usize) -> Result<Value> {
+        let rows = crate::runner::recent_runs(self, limit).await?;
+        Ok(json!(rows))
+    }
+
     /// Reads up to `scan_max` messages of `chat` older than `before` from Telegram and returns
     /// those whose text matches `pattern`, oldest first. Nothing is stored or marked read.
     pub async fn history(

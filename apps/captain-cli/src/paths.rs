@@ -11,6 +11,9 @@ const SOCKET_FILE: &str = "captain.sock";
 const STORE_FILE: &str = "inbox.sqlite";
 const SCOPE_FILE: &str = "scope.toml";
 const POLICY_FILE: &str = "policy.toml";
+const RUNNER_CONFIG_FILE: &str = "runner.toml";
+const RUNNER_STORE_FILE: &str = "runner.sqlite";
+const RUNNER_DIR: &str = "runner";
 const UI_TOKEN_FILE: &str = "ui_token";
 const RANDOM_SOURCE: &str = "/dev/urandom";
 const TOKEN_BYTES: usize = 32;
@@ -42,6 +45,18 @@ impl Paths {
 
     pub fn policy(&self) -> PathBuf {
         self.dir.join(POLICY_FILE)
+    }
+
+    pub fn runner_config(&self) -> PathBuf {
+        self.dir.join(RUNNER_CONFIG_FILE)
+    }
+
+    pub fn runner_store(&self) -> PathBuf {
+        self.dir.join(RUNNER_STORE_FILE)
+    }
+
+    pub fn runner_dir(&self) -> PathBuf {
+        self.dir.join(RUNNER_DIR)
     }
 
     /// Takes the session lock without waiting. The lock lasts until the returned file drops,
