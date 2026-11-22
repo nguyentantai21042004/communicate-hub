@@ -211,10 +211,8 @@ fn attachment(value: &Value) -> Option<Attachment> {
     let kind = kind_of(value.get("kind").and_then(Value::as_str)?)?;
     let source = if let Some(path) = string_field(value, "local_path") {
         AttachmentSource::LocalPath(path)
-    } else if let Some(url) = string_field(value, "url") {
-        AttachmentSource::Url(url)
     } else {
-        return None;
+        AttachmentSource::Url(string_field(value, "url")?)
     };
     Some(Attachment {
         kind,

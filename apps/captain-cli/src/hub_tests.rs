@@ -234,7 +234,7 @@ fn reply(method: &str, state: &Mutex<BotState>) -> (u16, String) {
                 .to_owned(),
         ),
         "getUpdates" => {
-            let batch: Vec<Value> = state.updates.drain(..).collect();
+            let batch: Vec<Value> = std::mem::take(&mut state.updates);
             (200, format!(r#"{{"ok":true,"result":{}}}"#, json!(batch)))
         }
         "createForumTopic" => {
