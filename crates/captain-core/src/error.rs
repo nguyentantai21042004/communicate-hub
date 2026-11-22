@@ -42,6 +42,17 @@ pub enum Error {
     /// A chat reference could not be parsed.
     #[error("chat reference {0:?} is not @username, a numeric id, or \"me\"")]
     InvalidChatRef(String),
+    /// A required string field was blank.
+    #[error("{0} cannot be empty")]
+    EmptyField(&'static str),
+    /// A custom chat folder id is below the minimum Telegram allows.
+    #[error("folder id {id} must be at least {min}")]
+    InvalidFolderId {
+        /// Given folder id.
+        id: i32,
+        /// Minimum allowed custom folder id.
+        min: i32,
+    },
 }
 
 /// Result alias for core validation.

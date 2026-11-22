@@ -8,6 +8,7 @@ pub mod error;
 pub mod ids;
 pub mod inbound;
 pub mod limits;
+pub mod organize;
 pub mod outbound;
 pub mod protocol;
 pub mod text;
@@ -17,6 +18,10 @@ pub use ids::{ChatId, ChatRef, MessageId};
 pub use inbound::{
     ChatKind, ChatSummary, DialogSummary, EventKind, ForwardOrigin, InboundEvent, MediaSummary,
     MessageView,
+};
+pub use organize::{
+    ContactInfo, ContactUpsert, DeletedHistory, DialogFolder, DialogFolderKind, DialogFolderSpec,
+    DialogFolders,
 };
 pub use outbound::{
     Content, MediaItem, MediaKind, MediaSource, OutgoingMessage, PhotoQuality, SendOptions,

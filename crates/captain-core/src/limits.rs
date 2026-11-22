@@ -12,3 +12,6 @@ pub const CAPTION_PREMIUM_MAX_UTF16: usize = 4096; // media caption with Telegra
 pub const ALBUM_MAX_ITEMS: usize = 10; // messages.sendMultiMedia multi_media vector
 pub const PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024; // larger images must be sent as a document
 pub const PHOTO_HD_MAX_SIDE_PX: u32 = 2560; // largest side the server keeps for a photo
+pub const CONTACT_NAME_MAX_UTF16: usize = 64; // contacts.addContact first_name and last_name
+pub const DIALOG_FILTER_ID_MIN: i32 = 2; // custom chat folder ids start at 2 (0 is All Chats)
+pub const DIALOG_FILTER_TITLE_MAX_UTF16: usize = 12; // dialogFilter title length limit

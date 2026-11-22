@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use captain_core::{
-    ChatId, ChatRef, DialogSummary, MessageId, MessageView, OutgoingMessage, SentMessage,
+    ChatId, ChatRef, ChatSummary, ContactInfo, ContactUpsert, DeletedHistory, DialogFolderSpec,
+    DialogFolders, DialogSummary, MessageId, MessageView, OutgoingMessage, SentMessage,
 };
 use grammers_client::peer::Peer;
 use grammers_client::sender::SenderPoolHandle;
@@ -395,6 +396,151 @@ impl Handle {
         }
         .await;
         self.finish_call("messages.getDialogs", generation, before, listed, false)
+    }
+
+    /// Lists saved Telegram contacts on the account.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Rpc`] when `contacts.getContacts` fails.
+    pub async fn contacts(&self) -> Result<Vec<ContactInfo>> {
+        self.require_sender("contacts.getContacts")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let listed = crate::organize::list_contacts(&client, self.self_id).await;
+        self.finish_call("contacts.getContacts", generation, before, listed, false)
+    }
+
+    /// Adds or renames a user in our own Telegram contact book without notifying them.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] if validation fails or target is not a user,
+    /// [`crate::Error::UnknownChat`] when unresolvable, or [`crate::Error::Rpc`] on rejection.
+    pub async fn upsert_contact(&self, spec: ContactUpsert) -> Result<()> {
+        self.require_sender("contacts.addContact")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let updated = crate::organize::upsert_contact(&self.outbound(&client), spec).await;
+        self.finish_call("contacts.addContact", generation, before, updated, false)
+    }
+
+    /// Deletes our own copy of a private user DM history (`revoke: false`).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] if target is not a user peer,
+    /// [`crate::Error::UnknownChat`] when unresolvable, or [`crate::Error::Rpc`] on rejection.
+    pub async fn delete_user_history(
+        &self,
+        chat: &ChatRef,
+        just_clear: bool,
+    ) -> Result<DeletedHistory> {
+        self.require_sender("messages.deleteHistory")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let deleted =
+            crate::organize::delete_user_history(&self.outbound(&client), chat, just_clear).await;
+        self.finish_call("messages.deleteHistory", generation, before, deleted, false)
+    }
+
+    /// Lists current chat folders (tabs) in display order.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Rpc`] when `messages.getDialogFilters` fails.
+    pub async fn dialog_folders(&self) -> Result<DialogFolders> {
+        self.require_sender("messages.getDialogFilters")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let listed = crate::organize::dialog_folders(&client, self.self_id).await;
+        self.finish_call(
+            "messages.getDialogFilters",
+            generation,
+            before,
+            listed,
+            false,
+        )
+    }
+
+    /// Creates or replaces a custom chat folder (`id >= 2`).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] if folder bounds fail, [`crate::Error::UnknownChat`] if any
+    /// peer cannot be resolved, or [`crate::Error::Rpc`] on rejection.
+    pub async fn upsert_dialog_folder(&self, spec: DialogFolderSpec) -> Result<()> {
+        self.require_sender("messages.updateDialogFilter")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let updated = crate::organize::upsert_dialog_folder(&self.outbound(&client), spec).await;
+        self.finish_call(
+            "messages.updateDialogFilter",
+            generation,
+            before,
+            updated,
+            false,
+        )
+    }
+
+    /// Deletes a custom chat folder (`id >= 2`).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] if `id < 2`, or [`crate::Error::Rpc`] on rejection.
+    pub async fn delete_dialog_folder(&self, id: i32) -> Result<()> {
+        self.require_sender("messages.updateDialogFilter")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let deleted = crate::organize::delete_dialog_folder(&client, id).await;
+        self.finish_call(
+            "messages.updateDialogFilter",
+            generation,
+            before,
+            deleted,
+            false,
+        )
+    }
+
+    /// Sets the display order of chat folder ids (`0` represents All Chats).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Rpc`] when `messages.updateDialogFiltersOrder` fails.
+    pub async fn reorder_dialog_folders(&self, order: Vec<i32>) -> Result<()> {
+        self.require_sender("messages.updateDialogFiltersOrder")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let updated = crate::organize::reorder_dialog_folders(&client, order).await;
+        self.finish_call(
+            "messages.updateDialogFiltersOrder",
+            generation,
+            before,
+            updated,
+            false,
+        )
+    }
+
+    /// Creates a private supergroup owned by the account (no other members invited).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Invalid`] if `title` is empty, or [`crate::Error::Rpc`] on rejection.
+    pub async fn create_private_group(&self, title: String, about: String) -> Result<ChatSummary> {
+        self.require_sender("channels.createChannel")?;
+        let generation = self.home.generation();
+        let before = self.session.home_auth_key();
+        let client = self.client();
+        let created =
+            crate::organize::create_private_group(&client, self.self_id, title, about).await;
+        self.finish_call("channels.createChannel", generation, before, created, false)
     }
 }
 
