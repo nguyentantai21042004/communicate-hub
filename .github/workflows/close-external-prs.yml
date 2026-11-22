@@ -1,0 +1,22 @@
+name: Close external PRs
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    if: github.event.pull_request.user.login != github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment and close external pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Cảm ơn bạn đã quan tâm. Repository này hiện chỉ tiếp nhận báo lỗi và góp ý qua tab Issues, không nhận Pull Request từ bên ngoài."
+          gh pr close "$PR_NUMBER" --repo "$REPO"
