@@ -754,22 +754,22 @@ mod tests {
 
     #[test]
     fn history_matches_ignore_case_and_come_oldest_first() {
-        let chat = -1_004_357_342_519;
+        let chat = -1_001_234_567_890;
         let newest_first = [
-            message(chat, 3, "GIỚI THIỆU lại Fleet"),
+            message(chat, 3, "GIỚI THIỆU lại tính năng"),
             message(chat, 2, "không liên quan"),
-            message(chat, 1, "Mình giới thiệu Fleet nhé"),
+            message(chat, 1, "Mình giới thiệu tính năng nhé"),
         ];
-        let regex = regex::RegexBuilder::new("giới thiệu.*fleet")
+        let regex = regex::RegexBuilder::new("giới thiệu.*tính năng")
             .case_insensitive(true)
             .build()
             .unwrap();
         let found = history_matches(ChatId(chat), &newest_first, &regex);
         let ids: Vec<i64> = found.iter().map(|m| m["id"].as_i64().unwrap()).collect();
         assert_eq!(ids, [1, 3]);
-        assert_eq!(found[0]["link"], "https://t.me/c/4357342519/1");
+        assert_eq!(found[0]["link"], "https://t.me/c/1234567890/1");
 
-        let group = history_matches(ChatId(-5_110_213_073), &newest_first[2..], &regex);
+        let group = history_matches(ChatId(-5_000_000_001), &newest_first[2..], &regex);
         assert!(group[0]["link"].is_null());
     }
 

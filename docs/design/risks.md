@@ -21,7 +21,7 @@ Source: <https://core.telegram.org/api/terms>.
 
 ## Data handling
 
-- Chats from AhaMove work can hold customer data. Each work chat added to scope sends that data
+- Work chats can hold customer data. Each work chat added to scope sends that data
   to Claude in P2. Decide per chat.
 - Message text is kept 30 days locally, excluded from Time Machine, never written to metrics or
   logs above `trace`.

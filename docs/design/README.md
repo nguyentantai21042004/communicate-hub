@@ -154,6 +154,6 @@ guessing.
 ## Open questions
 
 - Whether Tài accepts the API terms 1.5 risk. See [risks.md](risks.md). It gates P2.
-- Initial scope list, and whether AhaMove ops chats belong in it.
+- Initial scope list, and whether work ops chats belong in it.
 - Whether the second Mac may hold clones of work repos for the runner.
 - What "Jev" in the sketch refers to. See [optimizer.md](optimizer.md).

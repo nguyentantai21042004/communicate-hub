@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.tantai.captain.serve</string>
-  <key>ProgramArguments</key><array><string>/Users/tantai/Workspaces/research/telegram-captain/bin/serve</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/tantai/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>ProgramArguments</key><array><string>/Users/YOUR_USER/Workspaces/comms-hub/prototype/python/mcp-drafter/bin/serve</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/YOUR_USER/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
-  <key>StandardOutPath</key><string>/Users/tantai/.local/state/telegram-mcp/serve.log</string>
-  <key>StandardErrorPath</key><string>/Users/tantai/.local/state/telegram-mcp/serve.log</string>
+  <key>StandardOutPath</key><string>/Users/YOUR_USER/.local/state/telegram-mcp/serve.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USER/.local/state/telegram-mcp/serve.log</string>
 </dict>
 </plist>

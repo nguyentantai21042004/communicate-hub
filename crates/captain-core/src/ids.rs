@@ -84,8 +84,8 @@ mod tests {
 
     #[test]
     fn channel_id_strips_the_mark_only_from_channels() {
-        assert_eq!(ChatId(-1_004_357_342_519).channel_id(), Some(4_357_342_519));
-        assert_eq!(ChatId(-5_110_213_073).channel_id(), None);
-        assert_eq!(ChatId(1_875_972_244).channel_id(), None);
+        assert_eq!(ChatId(-1_001_234_567_890).channel_id(), Some(1_234_567_890));
+        assert_eq!(ChatId(-5_000_000_001).channel_id(), None);
+        assert_eq!(ChatId(123_456_789).channel_id(), None);
     }
 }
